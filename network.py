@@ -1,6 +1,9 @@
 import re
 
+import numpy as np
 import tensorflow as tf
+
+import dataset
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -69,7 +72,15 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
     return var
 
 
-def input_embedding_layers(pdfs):
+VOCAB_SIZE = {'chars': 10, 'fonts': 5, 'fontsizes': 5}
+EMBEDDING_DIMS = {'chars': 3, 'fonts': 2, 'fontsizes': 1}
+
+
+def _embedding_dim():
+    return sum(EMBEDDING_DIMS.values())
+
+
+def embedding_layers(input_pdfs):
     """Embed the input data into dense vector representations.
 
     Args:
@@ -77,11 +88,11 @@ def input_embedding_layers(pdfs):
     Returns:
         Dense vector space representation of the input data.
     """
-    slices = tf.unstack(pdfs, axis=3)
+    slices = tf.unstack(input_pdfs, axis=3)
     with tf.variable_scope('char_embed') as scope:
         embeddings = _variable_on_cpu(
             'embeddings',
-            [NUM_INPUT_CHARS, CHAR_EMBEDDING_DIM],
+            [VOCAB_SIZE['chars'], EMBEDDING_DIMS['chars']],
             tf.random_uniform_initializer(-1.0, 1.0)
         )
         input_embed = tf.nn.embedding_lookup(embeddings,
@@ -89,7 +100,7 @@ def input_embedding_layers(pdfs):
     with tf.variable_scope('font_embed') as scope:
         embeddings = _variable_on_cpu(
             'embeddings',
-            [NUM_FONTS, FONT_EMBEDDING_DIM],
+            [VOCAB_SIZE['fonts'], EMBEDDING_DIMS['fonts']],
             tf.random_uniform_initializer(-1.0, 1.0)
         )
         font_embed = tf.nn.embedding_lookup(embeddings,
@@ -97,20 +108,21 @@ def input_embedding_layers(pdfs):
     with tf.variable_scope('fontsize_embed') as scope:
         embeddings = _variable_on_cpu(
             'embeddings',
-            [NUM_FONTSIZES, 1],
+            [VOCAB_SIZE['fontsizes'], EMBEDDING_DIMS['fontsizes']],
             tf.random_uniform_initializer(-1.0, 1.0)
         )
         fontsize_embed = tf.nn.embedding_lookup(embeddings,
                                                 slices[2], name=scope.name)
 
-    embedded = tf.stack([input_embed, font_embed, fontsize_embed], axis=3)
+    embedded = tf.concat([input_embed, font_embed, fontsize_embed], 3)
+    return embedded
 
 
 def convolution_layers(embedded):
     """Build the convolution layers of the network.
 
     Args:
-        embedded: Tensors returned from :func:`input_embedding_layers`.
+        embedded: Tensors returned from :func:`embedding_layers`.
     Returns:
         Application of three convolution layers.
     """
@@ -123,9 +135,9 @@ def convolution_layers(embedded):
     with tf.variable_scope('conv1') as scope:
         conv1_num_filters = 5
         kernel = _variable_with_weight_decay(
-            'weights', shape=[4, 6, embedding_dim, conv1_num_filters],
+            'weights', shape=[4, 6, _embedding_dim(), conv1_num_filters],
             stddev=5e-2, wd=0.0)
-        conv = tf.nn.conv2d(pdfs, kernel, [1, 2, 2, 1], padding='VALID')
+        conv = tf.nn.conv2d(embedded, kernel, [1, 2, 2, 1], padding='VALID')
         biases = _variable_on_cpu('biases', [conv1_num_filters],
                                   tf.constant_initializer(0.0))
         pre_activation = tf.nn.bias_add(conv, biases)
@@ -147,7 +159,7 @@ def convolution_layers(embedded):
 
     # conv3
     with tf.variable_scope('conv3') as scope:
-        conv3_num_filters = 3
+        conv3_num_filters = 5
         kernel = _variable_with_weight_decay(
             'weights', shape=[3, 3, conv2_num_filters, conv3_num_filters],
             stddev=5e-2, wd=0.0)
@@ -159,3 +171,21 @@ def convolution_layers(embedded):
         _activation_summary(conv3)
 
     return conv3
+
+
+def _dummy():
+    pass
+
+
+if __name__ == '__main__':
+    data = dataset.read_datasets('data/', validation_size=100)
+    batch, _ = data.train.next_batch(100)
+    input_shape = batch.shape
+    test_data = np.random.randint(0, 5, size=input_shape, dtype='int32')
+    sess = tf.InteractiveSession()
+    input_pdfs = tf.placeholder(tf.int32, shape=input_shape)
+    e = embedding_layers(input_pdfs)
+    c = convolution_layers(e)
+    tf.global_variables_initializer().run()
+    shape = tf.shape(c)
+    print(shape.eval(feed_dict={input_pdfs: test_data}))
