@@ -1,10 +1,9 @@
 import contextlib
+import glob
 import json
 import logging
 import os
-import random
 import re
-import shutil
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -21,14 +20,11 @@ class Encoder:
     def __init__(
         self,
         datadir='data/',
-        bbox=(132, 560, 492, 660),
+        bbox=(132, 560, 498, 660),
         max_tokens=500,
-        holdout=0.2,
-        checkpoint=2000,
-        chunksize=100,
+        checkpoint=5000,
         file_prefixes={
-            'train': 'train',
-            'test': 'test',
+            'examples': 'examples',
             'encodings': 'encodings'
         },
         ext='.nc'
@@ -38,14 +34,12 @@ class Encoder:
         self.y_dim = bbox[3] - bbox[1]
         self.datadir = datadir
         self.max_tokens = max_tokens
-        self.holdout = holdout
         self.checkpoint = checkpoint
-        self.chunksize = chunksize
         self.file_prefixes = file_prefixes
         self.ext = ext
-        self.arrays = {}
+        self.examples = None
         self.encodings = {
-            'input chars': {'null': 0},
+            'chars': {'null': 0},
             'tokens': {'null': 0},
             'fonts': {'null': 0}
         }
@@ -60,7 +54,7 @@ class Encoder:
 
     def open(self):
         self._load_encoding_dicts()
-        self._load_arrays()
+        self.examples = self._create_new_dataset()
 
     def close(self):
         self._save_encoding_dicts()
@@ -73,10 +67,6 @@ class Encoder:
             self._parse(snippet)
 
     def _parse(self, snippet):
-        """
-        Warning: Currently the tokens matrix has its last entry
-        equal to the number of latex tokens parsed.
-        """
         try:
             example = self._create_new_example()
             features = example['features']
@@ -84,16 +74,12 @@ class Encoder:
             for node in snippet.iter('text'):
                 self._parse_input_char(features, node)
             self._parse_tokens(tokens, snippet.find('source'))
-            if random.random() > self.holdout:
-                array_name = 'train'
-            else:
-                array_name = 'test'
-            self.arrays[array_name] = xr.concat(
-                [self.arrays[array_name], example], dim='example')
-            self.processed = self.processed + 1
-            if self.processed > self.checkpoint:
-                self._save_checkpoint()
-                self._load_arrays()
+            self.examples = xr.concat(
+                [self.examples, example], dim='example')
+            self.processed += 1
+            if self.processed >= self.checkpoint:
+                self.close()
+                self.open()
                 self.processed = 0
         except InvalidSnippetError as e:
             logging.warning('Skipped snippet in %s - %s', self.filename, e)
@@ -140,8 +126,8 @@ class Encoder:
             font, len(self.encodings['fonts']))
 
     def _get_char_encoding(self, char):
-        return self.encodings['input chars'].setdefault(
-            char, len(self.encodings['input chars']))
+        return self.encodings['chars'].setdefault(
+            char, len(self.encodings['chars']))
 
     def _parse_tokens(self, encoded, node):
         tokens = latex.parse_into_tokens(node.text)
@@ -149,29 +135,24 @@ class Encoder:
             raise InvalidSnippetError("Number of latex tokens exceeds limit")
         for token in tokens:
             code = self._get_token_encoding(token)
-            prev_token_pos = encoded[0, -1]
-            encoded[0, prev_token_pos+1] = code
-            encoded[0, -1] = prev_token_pos + 1
+            num_tokens_parsed = encoded[0, -1]
+            encoded[0, num_tokens_parsed] = code
+            encoded[0, -1] += 1
+        encoded[0, -1] = 0
 
     def _get_token_encoding(self, token):
         return self.encodings['tokens'].setdefault(
             token, len(self.encodings['tokens']))
 
-    def _load_arrays(self):
-        for index, fname in self._zip_array_ids_and_filenames():
-            try:
-                self.arrays[index] = xr.open_mfdataset(
-                    fname, chunks={'example': self.chunksize}
-                )
-            except IOError:
-                self.arrays[index] = self._create_new_dataset()
-
     def _save_checkpoint(self):
-        self._save_arrays('tmp-')
-        for index in ['train', 'test']:
-            self.arrays[index].close()
-        for orig, dest in self._zip_checkpoint_and_master_filenames():
-            shutil.move(orig, dest)
+        self.examples.to_netcdf(
+            self._get_next_examples_filename(),
+            format='netCDF4', engine='netcdf4',
+            encoding={
+                'features': {'zlib': True, 'complevel': 9},
+                'tokens': {'zlib': True, 'complevel': 9}
+            },
+        )
 
     def _save_arrays(self, pre=''):
         for index, fname in self._zip_array_ids_and_filenames(pre):
@@ -218,29 +199,16 @@ class Encoder:
         with open(self._encoding_filename(), 'w') as f:
             json.dump(self.encodings, f)
 
-    def _zip_array_ids_and_filenames(self, pre=''):
-        arrays = ['train', 'test']
-        filenames = [
-            os.path.join(
-                self.datadir, pre + self.file_prefixes[ftype] + self.ext)
-            for ftype in arrays
-        ]
-        return zip(arrays, filenames)
-
-    def _zip_checkpoint_and_master_filenames(self):
-        arrays = ['train', 'test']
-        prefixes = ['tmp-', '']
-        filenames = [
-            [os.path.join(
-                self.datadir, pre + self.file_prefixes[ftype] + self.ext)
-                for pre in prefixes]
-            for ftype in arrays
-        ]
-        return filenames
-
     def _encoding_filename(self):
         prefix = self.file_prefixes['encodings']
         return os.path.join(self.datadir, prefix + '.json')
+
+    def _get_next_examples_filename(self):
+        file_format = self.file_prefixes['examples'] + '{:03d}' + self.ext
+        match = os.path.join(self.datadir,
+                             self.file_prefixes['examples'] + '*' + self.ext)
+        number_of_files = len(glob.glob(match))
+        return os.path.join(self.datadir, file_format.format(number_of_files))
 
 
 class InvalidSnippetError(Exception):

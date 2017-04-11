@@ -1,7 +1,12 @@
+import collections
 import json
 import os
 
 import xarray as xr
+
+
+FeatureSize = collections.namedtuple(
+    'FeatureSize', ['chars', 'fonts', 'fontsizes'])
 
 
 class Dataset:
@@ -39,26 +44,33 @@ class Datasets:
         self.validate = validate
         self.test = test
         self.encodings = encodings
+        input_vocab_sizes = {k: len(v)
+                             for k, v in encodings.items()
+                             if k != 'tokens'}
+        self.feature_vocab_size = FeatureSize(**input_vocab_sizes, fontsizes=20)
+        self.token_vocab_size = len(encodings['tokens'])
 
 
-def read_datasets(data_dir, validation_size=10000):
-    TRAIN_PDFS = 'train.nc'
-    TEST_PDFS = 'test.nc'
+def read_datasets(data_dir, validation_size=10000, test_size=10000):
+    EXAMPLE_PDFS = 'examples*.nc'
     ENCODINGS = 'encodings.json'
 
-    train_pdfs = _load_examples_file(os.path.join(data_dir, TRAIN_PDFS))
-    test_pdfs = _load_examples_file(os.path.join(data_dir, TEST_PDFS))
+    example_pdfs = _load_examples_file(os.path.join(data_dir, EXAMPLE_PDFS))
     with open(os.path.join(data_dir, ENCODINGS), 'r') as f:
         encodings = json.load(f)
-    if not 0 <= validation_size <= len(train_pdfs['example']):
+    if not 0 <= validation_size + test_size <= len(example_pdfs['example']):
         raise ValueError(
-            'Validation size should be between 0 and {}. Received: {}.'
-            .format(len(train_pdfs['example']), validation_size))
-    train = Dataset(train_pdfs[dict(example=slice(None, validation_size))])
-    validation = Dataset(train_pdfs[dict(example=slice(validation_size, None))])
-    test = Dataset(test_pdfs)
+            'Holdset set size should be between 0 and {}. Received: {}.'
+            .format(len(example_pdfs['example']), validation_size + test_size))
+    test = Dataset(example_pdfs[dict(example=slice(None, test_size))])
+    validation = Dataset(
+        example_pdfs[dict(example=slice(test_size,
+                                        test_size + validation_size))])
+    train = Dataset(
+        example_pdfs[dict(example=slice(validation_size + test_size, None))])
     return Datasets(train, validation, test, encodings)
 
 
-def _load_examples_file(filename, chunksize=100):
-    return xr.open_mfdataset(filename, chunks={'example': chunksize})
+def _load_examples_file(pattern, chunksize=100):
+    return xr.open_mfdataset(pattern, chunks={'example': chunksize},
+                             concat_dim='example')
