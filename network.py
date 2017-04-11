@@ -1,12 +1,7 @@
 import collections
-import copy
 import re
 
 import tensorflow as tf
-from tensorflow.contrib.rnn.python.ops import core_rnn
-from tensorflow.contrib.rnn.python.ops import core_rnn_cell
-# from tensorflow.contrib.rnn.python.ops import core_rnn_cell_impl
-from tensorflow.contrib import legacy_seq2seq as seq2seq
 
 import dataset
 
@@ -20,11 +15,13 @@ class Network:
         batch_size,
         validation_size,
         test_size,
+        learning_rate=0.1,
+        learning_rate_decay_factor=.1,
         rnn_cell_size=10,
         num_rnn_layers=1,
         conv_filter_sizes=FilterSizes(5, 3, 5),
-        embedding_dims=dataset.FeatureSize(
-            **{'chars': 3, 'fonts': 2, 'fontsizes': 1}),
+        embedding_dims=dataset.EmbeddingSize(
+            **{'chars': 3, 'fonts': 2, 'fontsizes': 1, 'tokens': 10}),
         use_lstm=False,
         data_dir='data/',
         use_fp16=False,
@@ -36,16 +33,31 @@ class Network:
         self.filters = conv_filter_sizes
         self.data_dir = data_dir
         self.embedding_dims = embedding_dims
+        self.input_dim = (embedding_dims.chars + embedding_dims.fonts +
+                          embedding_dims.fontsizes)
         self.use_lstm = use_lstm
         self.dtype = tf.float16 if use_fp16 else tf.float32
         self.data = dataset.read_datasets('data/', validation_size, test_size)
         self.tower_name = tower_name
+        self.learning_rate = tf.Variable(
+            float(learning_rate), trainable=False, dtype=self.dtype)
+        self.learning_rate_decay_op = self.learning_rate.assign(
+            self.learning_rate * learning_rate_decay_factor)
+        self.global_step = tf.Variable(0, trainable=False)
 
     def build(self):
-        self.input_pdfs = tf.placeholder(tf.int32, shape=[None, 366, 100, 3])
+
+        # Feeds for inputs.
+        self.input_pdfs = tf.placeholder(tf.int32, shape=[None, 366, 100, 3],
+                                         name='input')
+        self.tokens = tf.placeholder(
+            tf.int32, shape=[None, self.data.token_sequence_length],
+            name='tokens'
+        )
         e = self.embedding_layers(self.input_pdfs)
         c = self.convolution_layers(e)
-        self.rnn = self.seq2seq_layer(c)
+        r = self.seq2seq_layer(c, self.tokens)
+        self.rnn = self.loss_layer(r, self.tokens)
 
     def _activation_summary(self, x):
         """Helper to create summaries for activations.
@@ -151,9 +163,8 @@ class Network:
         # function by replacing all instances of tf.get_variable()
         #  with tf.Variable().
         with tf.variable_scope('conv1') as scope:
-            embedding_dim = sum(self.embedding_dims)
             kernel = self._variable_with_weight_decay(
-                'weights', shape=[4, 6, embedding_dim, self.filters.conv1],
+                'weights', shape=[4, 6, self.input_dim, self.filters.conv1],
                 stddev=5e-2, wd=0.0)
             conv = tf.nn.conv2d(embedded, kernel, [1, 2, 2, 1], padding='VALID')
             biases = self._variable_on_cpu(
@@ -184,39 +195,61 @@ class Network:
             self._activation_summary(conv3)
         return conv3
 
-    def seq2seq_layer(self, conv):
-        return conv
+    def seq2seq_layer(self, conv, token_inputs):
+        rnn_inputs = tf.reshape(conv, [self.batch_size, -1, self.filters.conv3])
+        num_tokens = self.data.token_vocab_size
+        with tf.variable_scope('encoder'):
+            cell = self._rnn_cell()
+            _, encoded_state = tf.nn.dynamic_rnn(cell, rnn_inputs,
+                                                 dtype=self.dtype)
+            self._activation_summary(encoded_state)
 
-    def _construct_seq2seq(self, cell, encoder_inputs,
-                           decoder_inputs, feed_previous):
-        with tf.variable_scope('seq2seq') as scope:
-            encoder_cell = copy.deepcopy(cell)
-            _, encoder_state = core_rnn.static_rnn(
-                encoder_cell, encoder_inputs, dtype=self.dtype, scope=scope)
-
-            cell = core_rnn_cell.OutputProjectionWrapper(cell, self.num_tokens)
-
-            return seq2seq.embedding_rnn_decoder(
-                decoder_inputs,
-                encoder_state,
-                cell,
-                self.num_tokens,
-                sum(self.embedding_dims),
-                output_projection=None,
-                feed_previous=feed_previous,
-                scope=scope, dtype=self.dtype
+        with tf.variable_scope('embed_tokens') as scope:
+            token_shape = tf.shape(token_inputs)
+            slice_shape = [token_shape[0], 1]
+            go_array = tf.fill(slice_shape, self.data.GO_TOKEN)
+            tokens_with_GO = tf.concat([go_array, token_inputs], 1)
+            embeddings = self._variable_on_cpu(
+                'embeddings',
+                [num_tokens, self.embedding_dims.tokens],
+                tf.random_uniform_initializer(-1.0, 1.0)
             )
+            token_embedding = tf.nn.embedding_lookup(
+                embeddings, tokens_with_GO, name=scope.name)
+
+        with tf.variable_scope('decoder'):
+            cell = self._rnn_cell()
+            cell = tf.contrib.rnn.OutputProjectionWrapper(cell, num_tokens)
+            decoder_outputs, _ = tf.nn.dynamic_rnn(cell, token_embedding,
+                                                   initial_state=encoded_state)
+        return decoder_outputs
+
+    def loss_layer(self, logits, targets):
+        # http://r2rt.com/recurrent-neural-networks-in-tensorflow-i.html
+        with tf.name_scope("sequence_loss", [logits, targets]):
+            slice_GO_token = tf.slice(
+                logits, begin=[0, 1, 0], size=[-1, -1, -1])
+            num_classes = tf.shape(slice_GO_token)[2]
+            logits_flat = tf.reshape(slice_GO_token, [-1, num_classes])
+            targets = tf.reshape(targets, [-1])
+            crossent = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                labels=targets, logits=logits_flat)
+            total_loss = tf.reduce_mean(crossent)
+            return total_loss
+        # train_step = tf.train.AdagradOptimizer(
+        #     learning_rate).minimize(total_loss)
 
     def _rnn_cell(self):
         if self.num_rnn_layers > 1:
             return tf.contrib.rnn.MultiRNNCell(
-                [self._single_rnn_cell() for _ in range(self.num_rnn_layers)])
-        return self._single_rnn_cell
+                [self._single_rnn_cell()
+                 for _ in range(self.num_rnn_layers)])
+        return self._single_rnn_cell()
 
     def _single_rnn_cell(self):
         if self.use_lstm:
             return tf.contrib.rnn.BasicLSTMCell(self.rnn_cell_size)
-        return tf.contrib.rnn.GRUCell(self.cell_size)
+        return tf.contrib.rnn.GRUCell(self.rnn_cell_size)
 
 
 def _dummy():
@@ -226,8 +259,9 @@ def _dummy():
 if __name__ == '__main__':
     network = Network(batch_size=100, validation_size=500, test_size=500)
     network.build()
-    batch, _ = network.data.train.next_batch(100)
+    feature_batch, token_batch = network.data.train.next_batch(100)
     sess = tf.InteractiveSession()
     tf.global_variables_initializer().run()
-    shape = tf.shape(network.rnn)
-    print(shape.eval(feed_dict={network.input_pdfs: batch}))
+    # shape = tf.shape(network.rnn)
+    print(network.rnn.eval(feed_dict={network.input_pdfs: feature_batch,
+                                      network.tokens: token_batch}))

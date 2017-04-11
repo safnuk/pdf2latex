@@ -8,6 +8,10 @@ import xarray as xr
 FeatureSize = collections.namedtuple(
     'FeatureSize', ['chars', 'fonts', 'fontsizes'])
 
+EmbeddingSize = collections.namedtuple(
+    'EmbeddingSize', ['chars', 'fonts', 'fontsizes', 'tokens']
+)
+
 
 class Dataset:
     def __init__(self, data):
@@ -44,11 +48,14 @@ class Datasets:
         self.validate = validate
         self.test = test
         self.encodings = encodings
+        self.encodings['tokens']['GO'] = len(self.encodings['tokens'])
+        self.GO_TOKEN = self.encodings['tokens']['GO']
         input_vocab_sizes = {k: len(v)
                              for k, v in encodings.items()
                              if k != 'tokens'}
         self.feature_vocab_size = FeatureSize(**input_vocab_sizes, fontsizes=20)
         self.token_vocab_size = len(encodings['tokens'])
+        self.token_sequence_length = train.tokens.shape[1]
 
 
 def read_datasets(data_dir, validation_size=10000, test_size=10000):
