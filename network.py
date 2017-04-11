@@ -46,7 +46,6 @@ class Network:
         self.global_step = tf.Variable(0, trainable=False)
 
     def build(self):
-
         # Feeds for inputs.
         self.input_pdfs = tf.placeholder(tf.int32, shape=[None, 366, 100, 3],
                                          name='input')
@@ -57,7 +56,8 @@ class Network:
         e = self.embedding_layers(self.input_pdfs)
         c = self.convolution_layers(e)
         r = self.seq2seq_layer(c, self.tokens)
-        self.rnn = self.loss_layer(r, self.tokens)
+        loss = self.loss_layer(r, self.tokens)
+        self.rnn = self.train_layer(loss)
 
     def _activation_summary(self, x):
         """Helper to create summaries for activations.
@@ -226,7 +226,7 @@ class Network:
 
     def loss_layer(self, logits, targets):
         # http://r2rt.com/recurrent-neural-networks-in-tensorflow-i.html
-        with tf.name_scope("sequence_loss", [logits, targets]):
+        with tf.name_scope("loss", [logits, targets]):
             slice_GO_token = tf.slice(
                 logits, begin=[0, 1, 0], size=[-1, -1, -1])
             num_classes = tf.shape(slice_GO_token)[2]
@@ -236,8 +236,12 @@ class Network:
                 labels=targets, logits=logits_flat)
             total_loss = tf.reduce_mean(crossent)
             return total_loss
-        # train_step = tf.train.AdagradOptimizer(
-        #     learning_rate).minimize(total_loss)
+
+    def train_layer(self, loss):
+        with tf.name_scope("train", [loss]):
+            train_step = tf.train.AdagradOptimizer(
+                self.learning_rate).minimize(loss)
+            return train_step
 
     def _rnn_cell(self):
         if self.num_rnn_layers > 1:
@@ -259,9 +263,10 @@ def _dummy():
 if __name__ == '__main__':
     network = Network(batch_size=100, validation_size=500, test_size=500)
     network.build()
-    feature_batch, token_batch = network.data.train.next_batch(100)
     sess = tf.InteractiveSession()
     tf.global_variables_initializer().run()
-    # shape = tf.shape(network.rnn)
-    print(network.rnn.eval(feed_dict={network.input_pdfs: feature_batch,
-                                      network.tokens: token_batch}))
+    for n in range(10):
+        print("Round {}".format(n))
+        feature_batch, token_batch = network.data.train.next_batch(100)
+        sess.run(network.rnn, feed_dict={network.input_pdfs: feature_batch,
+                                         network.tokens: token_batch})
