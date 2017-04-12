@@ -11,40 +11,32 @@ FilterSizes = collections.namedtuple('FilterSizes', ['conv1', 'conv2', 'conv3'])
 class Network:
     def __init__(
         self,
-        batch_size,
+        model,
         validation_size,
         test_size,
-        learning_rate=0.1,
-        learning_rate_decay_factor=.1,
-        num_steps=1000,
-        rnn_cell_size=10,
-        num_rnn_layers=1,
-        conv_filter_sizes=FilterSizes(5, 3, 5),
-        embedding_dims=dataset.EmbeddingSize(
-            **{'chars': 3, 'fonts': 2, 'fontsizes': 1, 'tokens': 10}),
-        use_lstm=False,
         data_dir='data/',
         log_dir='log/',
     ):
-        self.batch_size = batch_size
-        self.rnn_cell_size = rnn_cell_size
-        self.num_rnn_layers = num_rnn_layers
-        self.filters = conv_filter_sizes
+        self.batch_size = model.batch_size
+        self.rnn_cell_size = model.rnn_cell_size
+        self.num_rnn_layers = model.num_rnn_layers
+        self.filters = model.conv_filter_sizes
         self.data_dir = data_dir
-        self.log_dir = log_dir
-        self.embedding_dims = embedding_dims
-        self.input_dim = (embedding_dims.chars + embedding_dims.fonts +
-                          embedding_dims.fontsizes)
-        self.use_lstm = use_lstm
+        self.log_dir = log_dir + '/' + model.name + '/'
+        self.embedding_dims = model.embedding_dims
+        self.input_dim = (self.embedding_dims.chars +
+                          self.embedding_dims.fonts +
+                          self.embedding_dims.fontsizes)
+        self.use_lstm = model.use_lstm
         self.validation_size = validation_size
         self.test_size = test_size
-        self.data = dataset.read_datasets('data/', validation_size, test_size)
+        self.data = dataset.read_datasets(data_dir, validation_size, test_size)
         self.learning_rate = tf.Variable(
-            float(learning_rate), trainable=False)
+            float(model.learning_rate), trainable=False)
         self.learning_rate_decay_op = self.learning_rate.assign(
-            self.learning_rate * learning_rate_decay_factor)
+            self.learning_rate * model.learning_rate_decay_factor)
         self.global_step = tf.Variable(0, name='global_step', trainable=False)
-        self.num_steps = num_steps
+        self.max_steps = model.max_steps
 
     def build(self):
         # Feeds for inputs.
@@ -69,18 +61,24 @@ class Network:
 
     def train(self):
         sess = tf.InteractiveSession()
+        saver = tf.train.Saver()
         merged = tf.summary.merge_all()
-        writer = tf.summary.FileWriter(self.log_dir + '/train', sess.graph)
-        test_writer = tf.summary.FileWriter(self.log_dir + '/test')
+        writer = tf.summary.FileWriter(self.log_dir + 'train', sess.graph)
+        test_writer = tf.summary.FileWriter(self.log_dir + 'test')
         tf.global_variables_initializer().run()
-        for n in range(self.num_steps):
+        for n in range(self.max_steps):
             if n % 10 == 0:
-                summary, acc = sess.run([merged, self.accuracy],
-                                        feed_dict=self.feed_dict(False))
+                summary, acc, loss = sess.run(
+                    [merged, self.accuracy, self.loss],
+                    feed_dict=self.feed_dict(False)
+                )
                 test_writer.add_summary(summary, n)
-                print('Accuracy at step %s: %s' % (n, acc))
+                print('Accuracy at step {}: {}  Loss: {}'
+                      .format(n, acc, loss))
             else:
                 if n % 100 == 99:  # Record execution stats
+                    saver.save(sess, self.log_dir + 'checkpoint-',
+                               global_step=self.global_step)
                     run_options = tf.RunOptions(
                         trace_level=tf.RunOptions.FULL_TRACE)
                     run_metadata = tf.RunMetadata()
@@ -95,8 +93,8 @@ class Network:
                     summary, _ = sess.run([merged, self.rnn],
                                           feed_dict=self.feed_dict(True))
                     writer.add_summary(summary, n)
-            writer.close()
-            test_writer.close()
+        writer.close()
+        test_writer.close()
 
     def _activation_summary(self, x):
         """Helper to create summaries for activations.
@@ -203,7 +201,7 @@ class Network:
             cell = self._rnn_cell()
             _, encoded_state = tf.nn.dynamic_rnn(
                 cell, rnn_reversed, dtype=tf.float32)
-            self._activation_summary(encoded_state)
+            # self._activation_summary(encoded_state)
 
         with tf.name_scope('prepend_GO'):
             token_shape = tf.shape(token_inputs)
@@ -249,7 +247,7 @@ class Network:
 
     def train_layer(self, loss):
         with tf.name_scope('train'):
-            train_step = tf.train.AdagradOptimizer(
+            train_step = tf.train.AdamOptimizer(
                 self.learning_rate).minimize(loss, global_step=self.global_step)
             return train_step
 
@@ -266,11 +264,44 @@ class Network:
         return tf.contrib.rnn.GRUCell(self.rnn_cell_size)
 
 
-def _dummy():
-    pass
+class Model:
+    def __init__(
+        self,
+        name,
+        batch_size,
+        learning_rate=0.01,
+        learning_rate_decay_factor=.1,
+        max_steps=1000,
+        rnn_cell_size=64,
+        num_rnn_layers=1,
+        dropout=None,
+        conv_filter_sizes=FilterSizes(5, 3, 5),
+        embedding_dims=dataset.EmbeddingSize(
+            **{'chars': 5, 'fonts': 3, 'fontsizes': 1, 'tokens': 10}),
+        use_lstm=False,
+    ):
+        self.name = name
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self.learning_rate_decay_factor = learning_rate_decay_factor
+        self.max_steps = max_steps
+        self.rnn_cell_size = rnn_cell_size
+        self.num_rnn_layers = num_rnn_layers
+        self.dropout = dropout
+        self.conv_filter_sizes = conv_filter_sizes
+        self.embedding_dims = embedding_dims
+        self.use_lstm = use_lstm
+
+    @classmethod
+    def small(cls):
+        return cls('small', 100, 0.01, .1, 1000, 64, 1)
+
+    @classmethod
+    def medium(cls):
+        return cls('medium', 100, 0.01, .1, 2000, 128, 4)
 
 
 if __name__ == '__main__':
-    network = Network(batch_size=100, validation_size=500, test_size=500)
+    network = Network(Model.small(), validation_size=500, test_size=1)
     network.build()
     network.train()
