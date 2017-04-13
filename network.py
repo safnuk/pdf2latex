@@ -1,6 +1,7 @@
 import collections
 
 import tensorflow as tf
+import tensorflow.contrib.seq2seq as seq2seq
 
 import dataset
 
@@ -40,9 +41,11 @@ class Network:
         conv = self.convolution_layers(embed)
         encode = self.encoder_layer(conv)
         tokens = self.token_embed_layer(self.tokens)
-        decode = self.decoder_layer(encode, tokens)
-        self.loss = self.loss_layer(decode, self.tokens)
-        self.optimize = self.train_layer(self.loss)
+        decode_train = self.decoder_train_layer(encode, tokens)
+        self.training_loss = self.loss_layer(decode_train)
+        decode_infer = self.decoder_inference_layer(encode, tokens)
+        self.inference_loss = self.loss_layer(decode_infer)
+        self.optimize = self.train_layer(self.training_loss)
 
     def feed_dict(self, train=True):
         if train:
@@ -69,7 +72,7 @@ class Network:
         for n in range(self.model.max_steps):
             if n % 10 == 0:
                 summary, acc, loss = sess.run(
-                    [merged, self.accuracy, self.loss],
+                    [merged, self.accuracy, self.inference_loss],
                     feed_dict=self.feed_dict(False)
                 )
                 test_writer.add_summary(summary, n)
@@ -204,99 +207,69 @@ class Network:
 
     def token_embed_layer(self, token_inputs):
         num_tokens = self.data.token_vocab_size
-        with tf.name_scope('prepend_GO'):
+        with tf.name_scope('slice_off_seq_lengths'):
             token_shape = tf.shape(token_inputs)
-            slice_shape = [token_shape[0], 1]
-            go_array = tf.fill(slice_shape, self.data.GO_TOKEN)
-            tokens_with_GO = tf.concat([go_array, token_inputs], 1)
+            self.target_sequences, lengths = tf.split(
+                token_inputs, [token_shape[1] - 1, 1], axis=1)
+            self.sequence_lengths = tf.squeeze(lengths)
         with tf.name_scope('embed_tokens'):
-            embeddings = self._embedding_variable(
+            self.token_embedding_matrix = self._embedding_variable(
                 num_tokens, self.model.embedding_dims.tokens)
-            token_embedding = tf.nn.embedding_lookup(embeddings, tokens_with_GO)
+            token_embedding = tf.nn.embedding_lookup(
+                self.token_embedding_matrix, self.target_sequences)
             self._activation_summary(token_embedding)
         return token_embedding
 
-    def decoder_layer(self, encoded_state, token_embedding):
+    def decoder_train_layer(self, encoded_state, token_embedding):
         num_tokens = self.data.token_vocab_size
-        with tf.variable_scope('decoder'):
+        with tf.variable_scope('decoder_train'):
             cell = self._rnn_cell()
             cell = tf.contrib.rnn.OutputProjectionWrapper(cell, num_tokens)
-            decoder_outputs, _ = tf.nn.dynamic_rnn(cell, token_embedding,
-                                                   initial_state=encoded_state)
+            dynamic_fn_train = seq2seq.simple_decoder_fn_train(encoded_state)
+            decoder_outputs, state, context = seq2seq.dynamic_rnn_decoder(
+                cell, dynamic_fn_train, token_embedding,
+                self.sequence_lengths)
         return decoder_outputs
 
-    def _build_decoder(
-        self, encoded_state, token_embedding,
-    ):
+    def decoder_inference_layer(self, encoded_state, token_embedding):
         num_tokens = self.data.token_vocab_size
-        with tf.variable_scope('scan_decoder'):
+        with tf.variable_scope('decoder_test'):
             cell = self._rnn_cell()
             cell = tf.contrib.rnn.OutputProjectionWrapper(cell, num_tokens)
-        # x = tf.placeholder(tf.int32, [batch_size, num_steps], name='input_placeholder')
-        # y = tf.placeholder(tf.int32, [batch_size, num_steps], name='labels_placeholder')
+            dynamic_fn_test = seq2seq.simple_decoder_fn_inference(
+                None, encoded_state, self.token_embedding_matrix,
+                self.data.GO_CODE, self.data.STOP_CODE,
+                self.data.token_sequence_length - 2, num_tokens
+            )
+            decoder_outputs, state, context = seq2seq.dynamic_rnn_decoder(
+                cell, dynamic_fn_test)
+        return decoder_outputs
 
-        # embeddings = tf.get_variable('embedding_matrix', [num_classes, state_size])
+    def loss_layer(self, logits):
+        with tf.name_scope('loss'):
+            with tf.name_scope('trunc_seq'):
+                max_time = tf.shape(logits)[1]
+                targets = tf.slice(self.target_sequences,
+                                   [0, 0], [-1, max_time])
+            with tf.name_scope('flatten_logits'):
+                token_embedding_dim = tf.shape(logits)[2]
+                logits_flat = tf.reshape(logits, [-1, token_embedding_dim])
+                targets_flat = tf.reshape(targets, [-1])
+            with tf.name_scope('cross_entropy'):
+                cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                    labels=targets_flat, logits=logits_flat)
+                total_loss = tf.reduce_mean(cross_entropy)
+            tf.summary.scalar('cross_entropy', total_loss)
 
-        # rnn_inputs = tf.nn.embedding_lookup(embeddings, x)
-
-        # cell = tf.nn.rnn_cell.LSTMCell(state_size, state_is_tuple=True)
-        # cell = tf.nn.rnn_cell.MultiRNNCell([cell] * num_layers, state_is_tuple=True)
-        # init_state = cell.zero_state(batch_size, tf.float32)
-        # rnn_outputs, final_states = \
-        #     tf.scan(lambda a, x: cell(x, a[1]),
-        #             tf.transpose(rnn_inputs, [1,0,2]),
-        #             initializer=(tf.zeros([batch_size, state_size]), init_state))
-
-        # # there may be a better way to do this:
-        # final_state = tuple([tf.nn.rnn_cell.LSTMStateTuple(
-        #             tf.squeeze(tf.slice(c, [num_steps-1,0,0], [1, batch_size, state_size])),
-        #             tf.squeeze(tf.slice(h, [num_steps-1,0,0], [1, batch_size, state_size])))
-        #                 for c, h in final_states])
-
-        # with tf.variable_scope('softmax'):
-        #     W = tf.get_variable('W', [state_size, num_classes])
-        #     b = tf.get_variable('b', [num_classes], initializer=tf.constant_initializer(0.0))
-
-        # rnn_outputs = tf.reshape(rnn_outputs, [-1, state_size])
-        # y_reshaped = tf.reshape(tf.transpose(y,[1,0]), [-1])
-
-        # logits = tf.matmul(rnn_outputs, W) + b
-
-        # total_loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits, y_reshaped))
-        # train_step = tf.train.AdamOptimizer(learning_rate).minimize(total_loss)
-
-        # return dict(
-        #     x = x,
-        #     y = y,
-        #     init_state = init_state,
-        #     final_state = final_state,
-        #     total_loss = total_loss,
-        #     train_step = train_step
-        # )
-
-    def loss_layer(self, logits, targets):
-        # http://r2rt.com/recurrent-neural-networks-in-tensorflow-i.html
-        with tf.name_scope('remove_GO'):
-            slice_GO_token = tf.slice(
-                logits, begin=[0, 1, 0], size=[-1, -1, -1])
-            num_classes = tf.shape(slice_GO_token)[2]
-        with tf.name_scope('flatten_logits'):
-            logits_flat = tf.reshape(slice_GO_token, [-1, num_classes])
-            targets = tf.reshape(targets, [-1])
-        with tf.name_scope('cross_entropy'):
-            cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                labels=targets, logits=logits_flat)
-            total_loss = tf.reduce_mean(cross_entropy)
-        tf.summary.scalar('cross_entropy', total_loss)
-
-        with tf.name_scope('accuracy'):
-            with tf.name_scope('correct_prediction'):
-                correct_prediction = tf.equal(
-                    tf.argmax(logits_flat, 1), tf.cast(targets, tf.int64))
             with tf.name_scope('accuracy'):
-                self.accuracy = tf.reduce_mean(
-                    tf.cast(correct_prediction, tf.float32))
-        tf.summary.scalar('accuracy', self.accuracy)
+                with tf.name_scope('correct_prediction'):
+                    correct_prediction = tf.equal(
+                        tf.argmax(logits_flat, 1),
+                        tf.cast(targets_flat, tf.int64))
+                with tf.name_scope('accuracy'):
+                    self.accuracy = tf.reduce_mean(
+                        tf.cast(correct_prediction, tf.float32))
+            tf.summary.scalar('accuracy', self.accuracy)
         return total_loss
 
     def train_layer(self, loss):
@@ -307,17 +280,25 @@ class Network:
 
     def _rnn_cell(self):
         if self.model.num_rnn_layers > 1:
-            return tf.contrib.rnn.MultiRNNCell(
+            cell = tf.contrib.rnn.MultiRNNCell(
                 [self._single_rnn_cell()
                  for _ in range(self.model.num_rnn_layers)])
-        return self._single_rnn_cell()
+        else:
+            cell = self._single_rnn_cell()
+        return tf.contrib.rnn.DropoutWrapper(
+            cell, output_keep_prob=self.dropout)
 
     def _single_rnn_cell(self):
-        if self.model.use_ln_lstm:
-            return tf.contrib.rnn.LayerNormBasicLSTMCell(
-                self.model.rnn_cell_size, layer_norm=False,
-                dropout_keep_prob=self.dropout)
-        return tf.contrib.rnn.GRUCell(self.model.rnn_cell_size)
+        if self.model.use_lstm:
+            if self.model.use_rnn_layer_norm:
+                cell = tf.contrib.rnn.LayerNormBasicLSTMCell(
+                    self.model.rnn_cell_size, layer_norm=True,
+                    dropout_keep_prob=1.0)
+            else:
+                cell = tf.contrib.rnn.BasicLSTMCell(self.model.rnn_cell_size)
+        else:
+            cell = tf.contrib.rnn.GRUCell(self.model.rnn_cell_size)
+        return tf.contrib.rnn.DropoutWrapper(cell, input_keep_prob=self.dropout)
 
 
 class Model:
@@ -330,11 +311,11 @@ class Model:
         max_steps=1000,
         rnn_cell_size=64,
         num_rnn_layers=1,
-        dropout=None,
         conv_filter_sizes=FilterSizes(5, 3, 5),
         embedding_dims=dataset.EmbeddingSize(
             **{'chars': 5, 'fonts': 3, 'fontsizes': 1, 'tokens': 10}),
-        use_ln_lstm=False,
+        use_lstm=False,
+        use_rnn_layer_norm=False,
         dropout_keep_prob=1.0
     ):
         self.name = name
@@ -344,17 +325,17 @@ class Model:
         self.max_steps = max_steps
         self.rnn_cell_size = rnn_cell_size
         self.num_rnn_layers = num_rnn_layers
-        self.dropout = dropout
         self.filters = conv_filter_sizes
         self.embedding_dims = embedding_dims
-        self.use_ln_lstm = use_ln_lstm
+        self.use_lstm = use_lstm
+        self.use_rnn_layer_norm = use_rnn_layer_norm
         self.dropout_keep_prob = dropout_keep_prob
         self.input_dim = (embedding_dims.chars + embedding_dims.fonts +
                           embedding_dims.fontsizes)
 
     @classmethod
     def small(cls):
-        return cls('small', 100, 0.01, 1, 1000, 64, 1)
+        return cls('small', 100, 0.01, 1, 100, 64, 1)
 
     @classmethod
     def medium(cls):
@@ -363,11 +344,14 @@ class Model:
     @classmethod
     def medium_reg(cls):
         return cls('medium-reg', 100, 0.01, 1, 3000, 200, 4,
-                   use_ln_lstm=True, dropout_keep_prob=0.5)
+                   use_lstm=True, use_rnn_layer_norm=True)
 
 if __name__ == '__main__':
-    network = Network(Model.medium_reg(), validation_size=100, test_size=1,
-                      data_dir='/data/safnu1b/latex/data/',
-                      log_dir='/data/safnu1b/latex/data/log/')
+    BASE = '/Users/safnu1b/Documents/latex/'
+    BASE1 = ''
+    # BASE = '/data/safnu1b/latex/'
+    network = Network(Model.small(), validation_size=100, test_size=1,
+                      data_dir=BASE1 + 'data/',
+                      log_dir=BASE + 'data/log/')
     network.build()
     network.train()

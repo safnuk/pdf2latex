@@ -3,8 +3,8 @@ import shutil
 import arxiv_parser as ap
 import encoder
 
-BASE = '/data/safnu1b/latex/'
-# BASE = ''
+# BASE = '/data/safnu1b/latex/'
+BASE = ''
 INDIR = BASE + 'data/snippets'
 MOVETO_DIR = BASE + 'data/done'
 OUTDIR = BASE + 'data'

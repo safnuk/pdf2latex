@@ -39,9 +39,9 @@ class Encoder:
         self.ext = ext
         self.examples = None
         self.encodings = {
-            'chars': {'null': 0},
-            'tokens': {'null': 0},
-            'fonts': {'null': 0}
+            'chars': {'NULL': 0},
+            'tokens': {'NULL': 0, 'GO': 1, 'STOP': 2},
+            'fonts': {'NULL': 0}
         }
         self.processed = 0
 
@@ -133,12 +133,16 @@ class Encoder:
         tokens = latex.parse_into_tokens(node.text)
         if len(tokens) > self.max_tokens:
             raise InvalidSnippetError("Number of latex tokens exceeds limit")
+        encoded[0, 0] = self._get_token_encoding('GO')
+        encoded[0, -1] = 1
         for token in tokens:
             code = self._get_token_encoding(token)
             num_tokens_parsed = encoded[0, -1]
             encoded[0, num_tokens_parsed] = code
             encoded[0, -1] += 1
-        encoded[0, -1] = 0
+        end = encoded[0, -1]
+        encoded[0, end] = self._get_token_encoding('STOP')
+        encoded[0, -1] += 1
 
     def _get_token_encoding(self, token):
         return self.encodings['tokens'].setdefault(
@@ -173,7 +177,7 @@ class Encoder:
             dims=('example', 'x', 'y', 'feature'),
         )
         tokens = xr.DataArray(
-            np.zeros([0, self.max_tokens+1], dtype='int32'),
+            np.zeros([0, self.max_tokens+3], dtype='int32'),
             dims=('example', 'token'),
         )
         return xr.Dataset({'features': features, 'tokens': tokens})
@@ -185,7 +189,7 @@ class Encoder:
             dims=('example', 'x', 'y', 'feature'),
         )
         tokens = xr.DataArray(
-            np.zeros([1, self.max_tokens+1], dtype='int32'),
+            np.zeros([1, self.max_tokens+3], dtype='int32'),
             dims=('example', 'token'),
         )
         return xr.Dataset({'features': features, 'tokens': tokens})

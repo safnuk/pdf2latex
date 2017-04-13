@@ -48,13 +48,15 @@ class Datasets:
         self.validate = validate
         self.test = test
         self.encodings = encodings
-        self.encodings['tokens']['GO'] = len(self.encodings['tokens'])
-        self.GO_TOKEN = self.encodings['tokens']['GO']
+        self.GO_CODE = self.encodings['tokens']['GO']
+        self.STOP_CODE = self.encodings['tokens']['STOP']
         input_vocab_sizes = {k: len(v)
                              for k, v in encodings.items()
                              if k != 'tokens'}
         self.feature_vocab_size = FeatureSize(**input_vocab_sizes, fontsizes=20)
         self.token_vocab_size = len(encodings['tokens'])
+        # the last entry of each token sequence is the length of the
+        # sequence (remaining entries are padded with 'null' code = 0)
         self.token_sequence_length = train.tokens.shape[1]
 
 
