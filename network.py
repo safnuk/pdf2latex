@@ -1,4 +1,6 @@
 import collections
+import os
+import shutil
 
 import tensorflow as tf
 
@@ -15,7 +17,8 @@ class Network:
         self.global_step = tf.Variable(0, name='global_step', trainable=False)
         self.input = dataset.Batch(
             tf.placeholder(tf.int32, shape=[None, 366, 100, 3]),
-            tf.placeholder(tf.int32, shape=[None, data.token_sequence_length])
+            tf.placeholder(tf.int32,
+                           shape=[None, self.model.data.token_sequence_length])
         )
         self.feature_embedding
         self.convolution
@@ -106,20 +109,38 @@ class Network:
     def decoder(self):
         cell = self._rnn_cell()
         time_major = tf.transpose(self.token_embedding, [1, 0, 2])
+        W = tf.get_variable(
+            'W', [self.model.rnn_cell_size, self.model.embedding_dims.tokens],
+            initializer=tf.truncated_normal_initializer()
+        )
+        b = tf.get_variable('b', [self.model.embedding_dims.tokens],
+                            initializer=tf.constant_initializer(0.0))
 
-        decoder_output = tf.scan(lambda a, x: cell(x, a)[1],
-                                 time_major, initializer=self.encoder)
+        def fn(a, x):
+            state1, state2 = cell(x, a[1])
+            return (tf.reshape(
+                tf.matmul(state1, W) + b,
+                [self.model.batch_size, self.model.embedding_dims.tokens]),
+                state2)
+
+        initial_input = tf.zeros(
+            [self.model.batch_size, self.model.embedding_dims.tokens],
+            dtype=tf.float32)
+        decoder_output, final_state = tf.scan(
+            fn, time_major, initializer=(initial_input, self.encoder))
         return tf.transpose(decoder_output, [1, 0, 2])
 
     @scope.lazy_load
     def logits(self):
         W = tf.get_variable(
-            'W', [self.model.rnn_cell_size, self.model.token_vocab_size],
+            'W', [self.model.embedding_dims.tokens,
+                  self.model.token_vocab_size],
             initializer=tf.truncated_normal_initializer()
         )
         b = tf.get_variable('b', [self.model.token_vocab_size],
                             initializer=tf.constant_initializer(0.0))
-        decoded_flat = tf.reshape(self.decoder, [-1, self.model.rnn_cell_size])
+        decoded_flat = tf.reshape(self.decoder,
+                                  [-1, self.model.embedding_dims.tokens])
         return tf.matmul(decoded_flat, W) + b
 
     @scope.lazy_load
@@ -223,14 +244,15 @@ class Model:
     def __init__(
         self,
         name,
+        datadir,
+        validation_size=500,
+        test_size=1,
         batch_size=100,
         learning_rate=0.01,
         learning_rate_decay_factor=.1,
         max_steps=1000,
         rnn_cell_size=64,
         num_rnn_layers=1,
-        feature_vocab_size=500,
-        token_vocab_size=1000,
         conv_filter_sizes=FilterSizes(5, 3, 5),
         embedding_dims=dataset.EmbeddingSize(
             **{'chars': 5, 'fonts': 3, 'fontsizes': 1, 'tokens': 10}),
@@ -239,14 +261,15 @@ class Model:
         dropout_keep_prob=1.0
     ):
         self.name = name
+        self.data = dataset.read_datasets(datadir, validation_size, test_size)
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.learning_rate_decay_factor = learning_rate_decay_factor
         self.max_steps = max_steps
         self.rnn_cell_size = rnn_cell_size
         self.num_rnn_layers = num_rnn_layers
-        self.feature_vocab_size = feature_vocab_size
-        self.token_vocab_size = token_vocab_size
+        self.feature_vocab_size = self.data.feature_vocab_size
+        self.token_vocab_size = self.data.token_vocab_size
         self.filters = conv_filter_sizes
         self.embedding_dims = embedding_dims
         self.use_lstm = use_lstm
@@ -256,85 +279,63 @@ class Model:
                             embedding_dims.fonts +
                             embedding_dims.fontsizes)
 
-    @classmethod
-    def small(cls, feature_vocab_size, token_vocab_size):
-        return cls('small', 100, 0.01, 1, 400, 64, 1,
-                   feature_vocab_size, token_vocab_size)
+    def feed_dict(self, input_feed, validate=False):
+        batch = self.data.train.next_batch(self.batch_size)
+        return {input_feed.pdf: batch.pdf, input_feed.token: batch.token}
 
     @classmethod
-    def medium(cls, feature_vocab_size, token_vocab_size):
-        return cls('medium', 100, 0.001, 1, 2000, 128, 4,
-                   feature_vocab_size, token_vocab_size)
+    def small(cls, datadir, validation_size=500, test_size=1):
+        return cls('small', datadir, validation_size, test_size,
+                   100, 0.01, 1, 400, 64, 1)
 
     @classmethod
-    def medium_reg(cls, feature_vocab_size, token_vocab_size):
-        return cls('medium-reg', 100, 0.01, 1, 3000, 200, 4,
-                   feature_vocab_size, token_vocab_size,
+    def medium(cls, datadir, validation_size=500, test_size=1):
+        return cls('medium', validation_size, test_size,
+                   100, 0.001, 1, 2000, 128, 4)
+
+    @classmethod
+    def medium_reg(cls, datadir, validation_size=500, test_size=1):
+        return cls('medium-reg', validation_size, test_size,
+                   100, 0.01, 1, 3000, 200, 4,
                    use_lstm=True, use_rnn_layer_norm=True)
 
 
-if __name__ == '__main__':
-    BASE = '/Users/safnu1b/Documents/latex/'
-    BASE1 = ''
-    # BASE = '/data/safnu1b/latex/'
-    data_dir = BASE1 + 'data/'
-    log_dir = BASE + 'data/log/'
-    validation_size = 500
-    test_size = 1
-    data = dataset.read_datasets(data_dir, validation_size, test_size)
-    network = Network(Model.small(data.feature_vocab_size,
-                                  data.token_vocab_size))
+def train(logdir, datadir, clear_old_logs=True):
+    logdir = logdir + 'small/'
+    if clear_old_logs:
+        if os.path.exists(logdir):
+            shutil.rmtree(logdir)
 
-    sess = tf.InteractiveSession()
-    saver = tf.train.Saver()
-    merged = tf.summary.merge_all()
-    writer = tf.summary.FileWriter(log_dir + 'train', sess.graph)
-    test_writer = tf.summary.FileWriter(log_dir + 'test')
-    tf.global_variables_initializer().run()
-    for n in range(network.model.max_steps):
-        batch = data.train.next_batch(network.model.batch_size)
-        summary, loss, acc, _ = sess.run(
-            [merged, network.loss, network.accuracy, network.optimize],
-            feed_dict={network.input.pdf: batch.pdf,
-                       network.input.token: batch.token})
-        if n % 10 == 0:
-            print('Round {} loss: {}   accuracy: {}'.format(n, loss, acc))
-        writer.add_summary(summary, n)
-        # if n % 10 == 0:
-        #     summary, acc, loss = sess.run(
-        #         [merged, network.accuracy, network.loss],
-        #         feed_dict=feed_dict(False)
-        #     )
-        #     test_writer.add_summary(summary, n)
-        #     print('Accuracy at step {}: {}  Loss: {}'
-        #             .format(n, acc, loss))
-        # else:
-        #     if n % 100 == 99:  # Record execution stats
-        #         saver.save(sess, log_dir + 'checkpoint-',
-        #                     global_step=network.global_step)
-        #         run_options = tf.RunOptions(
-        #             trace_level=tf.RunOptions.FULL_TRACE)
-        #         run_metadata = tf.RunMetadata()
-        #         summary, _ = sess.run([merged, network.optimize],
-        #                                 feed_dict=feed_dict(True),
-        #                                 options=run_options,
-        #                                 run_metadata=run_metadata)
-        #         writer.add_run_metadata(run_metadata, 'step%03d' % n)
-        #         writer.add_summary(summary, n)
-        #         print('Adding run metadata for', n)
-        #     # elif n % 10 == 2:
-        #     #     summary, acc, loss, inferences = sess.run(
-        #     #         [merged, network.accuracy, network.loss,
-        #     #             ],
-        #     #         feed_dict=feed_dict(True)
-        #     #     )
-        #     #     writer.add_summary(summary, n)
-        #     #     print('Training accuracy at step {}: {}  Loss: {}'
-        #     #             .format(n, acc, loss))
-        #     #     print(inferences)
-        #     else:  # Record a summary
-        #         summary, _ = sess.run([merged, network.optimize],
-        #                                 feed_dict=feed_dict(True))
-        #         writer.add_summary(summary, n)
-    writer.close()
-    test_writer.close()
+    with tf.Graph().as_default() as graph:
+        network = Network(Model.small(datadir))
+        summaries = tf.summary.merge_all()
+
+    sv = tf.train.Supervisor(logdir=logdir, summary_op=None, graph=graph)
+    with sv.managed_session() as sess:
+
+        # run until training should stop
+        rounds = 0
+        while not sv.should_stop():
+            loss, acc, s,  _ = sess.run(
+                [network.loss, network.accuracy, summaries,
+                 network.optimize],
+                feed_dict=network.model.feed_dict(network.input))
+
+            # hand over your own summaries to the Supervisor
+            sv.summary_computed(sess, s)
+
+            if rounds % 10 == 0:
+                print(
+                    'Round {} Loss: {} Accuracy: {}'.format(rounds, loss, acc))
+
+            if rounds > network.model.max_steps:
+                sv.request_stop()
+            rounds += 1
+
+if __name__ == '__main__':
+    # BASE = '/Users/safnu1b/Documents/latex/'
+    BASE1 = ''
+    BASE = '/data/safnu1b/latex/'
+    datadir = BASE1 + 'data/'
+    logdir = BASE + 'log/'
+    train(logdir, datadir)
