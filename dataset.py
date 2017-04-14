@@ -13,6 +13,12 @@ EmbeddingSize = collections.namedtuple(
 )
 
 
+class Batch:
+    def __init__(self, pdf, token):
+        self.pdf = pdf
+        self.token = token
+
+
 class Dataset:
     def __init__(self, data):
         self.data = data
@@ -39,7 +45,7 @@ class Dataset:
         self._index_in_epoch += batch_size
         end = self._index_in_epoch
         batch = self.data[dict(example=slice(start, end))]
-        return batch.features.values, batch.tokens.values
+        return Batch(batch.features.values, batch.tokens.values)
 
 
 class Datasets:
