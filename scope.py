@@ -38,3 +38,16 @@ def lazy_load(function, scope=None, *args, **kwargs):
                 setattr(self, attribute, function(self))
         return getattr(self, attribute)
     return decorator
+
+
+def lazy_load_no_scope(function):
+    attribute = '_cache_' + function.__name__
+
+    @property
+    @functools.wraps(function)
+    def decorator(self):
+        if not hasattr(self, attribute):
+            setattr(self, attribute, function(self))
+        return getattr(self, attribute)
+
+    return decorator

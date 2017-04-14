@@ -20,6 +20,7 @@ class Network:
             tf.placeholder(tf.int32,
                            shape=[None, self.model.data.token_sequence_length])
         )
+        self.feed_prev_prob = tf.placeholder(tf.float32, shape=[])
         self.feature_embedding
         self.convolution
         self.encoder
@@ -110,14 +111,32 @@ class Network:
         cell = self._rnn_cell()
         time_major = tf.transpose(self.token_embedding, [1, 0, 2])
         W = tf.get_variable(
-            'W', [self.model.rnn_cell_size, self.model.embedding_dims.tokens],
+            'weight',
+            [self.model.rnn_cell_size, self.model.embedding_dims.tokens],
             initializer=tf.truncated_normal_initializer()
         )
-        b = tf.get_variable('b', [self.model.embedding_dims.tokens],
+        self._activation_summary(W)
+        b = tf.get_variable('bias', [self.model.embedding_dims.tokens],
                             initializer=tf.constant_initializer(0.0))
+        self._activation_summary(b)
+
+        feed_prev = tf.random_uniform(
+            [tf.shape(time_major)[0]], dtype=tf.float32)
 
         def fn(a, x):
-            state1, state2 = cell(x, a[1])
+            fp, input = x
+
+            def f1():
+                return input
+
+            def f2():
+                return a[0]
+
+            input_or_prev_output = tf.case(
+                [(tf.less(self.feed_prev_prob, fp), f1)], default=f2)
+            input_or_prev_output.set_shape(
+                [self.model.batch_size, self.model.embedding_dims.tokens])
+            state1, state2 = cell(input_or_prev_output, a[1])
             return (tf.reshape(
                 tf.matmul(state1, W) + b,
                 [self.model.batch_size, self.model.embedding_dims.tokens]),
@@ -127,43 +146,51 @@ class Network:
             [self.model.batch_size, self.model.embedding_dims.tokens],
             dtype=tf.float32)
         decoder_output, final_state = tf.scan(
-            fn, time_major, initializer=(initial_input, self.encoder))
+            fn, (feed_prev, time_major),
+            initializer=(initial_input, self.encoder))
         return tf.transpose(decoder_output, [1, 0, 2])
 
     @scope.lazy_load
     def logits(self):
         W = tf.get_variable(
-            'W', [self.model.embedding_dims.tokens,
-                  self.model.token_vocab_size],
+            'weight',
+            [self.model.embedding_dims.tokens, self.model.token_vocab_size],
             initializer=tf.truncated_normal_initializer()
         )
-        b = tf.get_variable('b', [self.model.token_vocab_size],
+        self._activation_summary(W)
+        b = tf.get_variable('bias', [self.model.token_vocab_size],
                             initializer=tf.constant_initializer(0.0))
+        self._activation_summary(b)
         decoded_flat = tf.reshape(self.decoder,
                                   [-1, self.model.embedding_dims.tokens])
         return tf.matmul(decoded_flat, W) + b
 
-    @scope.lazy_load
+    @scope.lazy_load_no_scope
     def loss(self):
-        targets_flat = tf.reshape(self.target_sequences, [-1], name='flatten')
-        cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
-            labels=targets_flat, logits=self.logits)
-        total_loss = tf.reduce_mean(cross_entropy)
-        tf.summary.scalar('cross_entropy', total_loss)
-        return total_loss
+        with tf.variable_scope('loss') as scope:
+            self.loss_scope = scope
+            targets_flat = tf.reshape(self.target_sequences,
+                                      [-1], name='flatten')
+            cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                labels=targets_flat, logits=self.logits)
+            total_loss = tf.reduce_mean(cross_entropy)
+            tf.summary.scalar('cross_entropy', total_loss,
+                              collections=['train', 'test'])
+            return total_loss
 
-    @scope.lazy_load('loss')
+    @scope.lazy_load_no_scope
     def accuracy(self):
-        targets_flat = tf.reshape(self.target_sequences, [-1], name='flatten')
-        # targets_flat = tf.get_default_graph() \
-        #     .get_operation_by_name('loss/flatten')
-        correct_prediction = tf.equal(
-            tf.cast(tf.argmax(self.logits, 1), tf.int32),
-            targets_flat, name='correct')
-        accuracy = tf.reduce_mean(
-            tf.cast(correct_prediction, tf.float32))
-        tf.summary.scalar('accuracy', accuracy)
-        return accuracy
+        with tf.variable_scope(self.loss_scope.original_name_scope):
+            targets_flat = tf.get_default_graph() \
+                .get_tensor_by_name('loss/flatten:0')
+            correct_prediction = tf.equal(
+                tf.cast(tf.argmax(self.logits, 1), tf.int32),
+                targets_flat, name='correct')
+            accuracy = tf.reduce_mean(
+                tf.cast(correct_prediction, tf.float32))
+            tf.summary.scalar('accuracy', accuracy,
+                              collections=['train', 'test'])
+            return accuracy
 
     @scope.lazy_load
     def optimize(self):
@@ -180,10 +207,12 @@ class Network:
         Returns:
             nothing
         """
-        with tf.name_scope('summaries'):
-            tensor_name = x.op.name
-            tf.summary.histogram(tensor_name + '/activations', x)
-            tf.summary.scalar(tensor_name + '/sparsity', tf.nn.zero_fraction(x))
+        # with tf.name_scope('summaries'):
+        tensor_name = x.op.name
+        tf.summary.histogram(
+            tensor_name + '/activations', x, collections=['train'])
+        tf.summary.scalar(tensor_name + '/sparsity', tf.nn.zero_fraction(x),
+                          collections=['train'])
 
     def _conv_relu(self, input, kernel_shape, strides, padding):
         weights = tf.get_variable(
@@ -306,36 +335,54 @@ def train(logdir, datadir, clear_old_logs=True):
         if os.path.exists(logdir):
             shutil.rmtree(logdir)
 
+    def feed_dict(train=True):
+        batch = network.model.data.train.next_batch(network.model.batch_size)
+        if train:
+            feed_prev = 0.0
+        else:
+            feed_prev = 1.0
+        return {
+            network.input.pdf: batch.pdf,
+            network.input.token: batch.token,
+            network.feed_prev_prob: feed_prev
+        }
+
     with tf.Graph().as_default() as graph:
         network = Network(Model.small(datadir))
-        summaries = tf.summary.merge_all()
+        train_summaries = tf.summary.merge_all('train')
+        test_summaries = tf.summary.merge_all('test')
 
     sv = tf.train.Supervisor(logdir=logdir, summary_op=None, graph=graph)
+    writer = tf.summary.FileWriter(logdir + 'test/')
+
     with sv.managed_session() as sess:
 
         # run until training should stop
         rounds = 0
         while not sv.should_stop():
-            loss, acc, s,  _ = sess.run(
-                [network.loss, network.accuracy, summaries,
-                 network.optimize],
-                feed_dict=network.model.feed_dict(network.input))
-
-            # hand over your own summaries to the Supervisor
-            sv.summary_computed(sess, s)
-
             if rounds % 10 == 0:
+                loss, acc, s = sess.run(
+                    [network.loss, network.accuracy, test_summaries],
+                    feed_dict=feed_dict(train=False))
                 print(
                     'Round {} Loss: {} Accuracy: {}'.format(rounds, loss, acc))
+                writer.add_summary(s)
+            else:
+                loss, acc, s,  _ = sess.run(
+                    [network.loss, network.accuracy, train_summaries,
+                     network.optimize],
+                    feed_dict=feed_dict(train=True))
+                sv.summary_computed(sess, s)
 
             if rounds > network.model.max_steps:
                 sv.request_stop()
             rounds += 1
+        writer.close()
 
 if __name__ == '__main__':
-    # BASE = '/Users/safnu1b/Documents/latex/'
+    # BASE = '/data/safnu1b/latex/'
+    BASE = '/Users/safnu1b/Documents/latex/'
     BASE1 = ''
-    BASE = '/data/safnu1b/latex/'
     datadir = BASE1 + 'data/'
     logdir = BASE + 'log/'
     train(logdir, datadir)
