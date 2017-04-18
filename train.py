@@ -63,7 +63,7 @@ def train(model, logdir, clear_old_logs=True):
                 print(
                     'Round {} Loss: {} Accuracy: {}'
                     .format(step, loss, acc))
-            elif step % 100 == 99:  # Record execution stats
+            if step % 100 == 99:  # Record execution stats
                 run_options = tf.RunOptions(
                     trace_level=tf.RunOptions.FULL_TRACE)
                 run_metadata = tf.RunMetadata()
