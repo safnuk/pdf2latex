@@ -110,6 +110,9 @@ class Network:
     def decoder(self):
         cell = self._rnn_cell()
         time_major = tf.transpose(self.token_embedding, [1, 0, 2])
+        go_tokens = tf.slice(time_major, [0, 0, 0], [1, -1, -1],
+                             name='go_token_slice')
+        go_tokens = tf.squeeze(go_tokens)
         W = tf.get_variable(
             'weight',
             [self.model.rnn_cell_size, self.model.embedding_dims.tokens],
@@ -142,13 +145,14 @@ class Network:
                 [self.model.batch_size, self.model.embedding_dims.tokens]),
                 state2)
 
-        initial_input = tf.zeros(
-            [self.model.batch_size, self.model.embedding_dims.tokens],
-            dtype=tf.float32)
         decoder_output, final_state = tf.scan(
             fn, (feed_prev, time_major),
-            initializer=(initial_input, self.encoder))
-        return tf.transpose(decoder_output, [1, 0, 2])
+            initializer=(go_tokens, self.encoder))
+        # remove tail from decoder_output and head from inputs so that
+        # matching is performed on shifted-by-one string
+        decoder_trimmed = tf.slice(decoder_output, [0, 0, 0],
+                                   [tf.shape(decoder_output)[0] - 1, -1, -1])
+        return tf.transpose(decoder_trimmed, [1, 0, 2])
 
     @scope.lazy_load
     def logits(self):
@@ -169,8 +173,11 @@ class Network:
     def loss(self):
         with tf.variable_scope('loss') as scope:
             self.loss_scope = scope
-            targets_flat = tf.reshape(self.target_sequences,
-                                      [-1], name='flatten')
+
+            # slice off head (GO token) from each sequence so that
+            # targets and logits are shifted-by-one from each other
+            targets = tf.slice(self.target_sequences, [0, 1], [-1, -1])
+            targets_flat = tf.reshape(targets, [-1], name='flatten')
             cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
                 labels=targets_flat, logits=self.logits)
             total_loss = tf.reduce_mean(cross_entropy)
@@ -315,22 +322,22 @@ class Model:
     @classmethod
     def small(cls, datadir, validation_size=500, test_size=1):
         return cls('small', datadir, validation_size, test_size,
-                   100, 0.01, 1, 400, 64, 1)
+                   100, 1e-3, 1, 2000, 64, 1)
 
     @classmethod
-    def medium(cls, datadir, validation_size=500, test_size=1):
-        return cls('medium', validation_size, test_size,
-                   100, 0.001, 1, 2000, 128, 4)
+    def medium(cls, datadir, validation_size=100, test_size=1):
+        return cls('medium', datadir, validation_size, test_size,
+                   100, 0.0001, 1, 2000, 256, 2)
 
     @classmethod
     def medium_reg(cls, datadir, validation_size=500, test_size=1):
-        return cls('medium-reg', validation_size, test_size,
+        return cls('medium-reg', datadir, validation_size, test_size,
                    100, 0.01, 1, 3000, 200, 4,
                    use_lstm=True, use_rnn_layer_norm=True)
 
 
-def train(logdir, datadir, clear_old_logs=True):
-    logdir = logdir + 'small/'
+def train(model, logdir, clear_old_logs=True):
+    logdir = logdir + model.name + '/'
     if clear_old_logs:
         if os.path.exists(logdir):
             shutil.rmtree(logdir)
@@ -347,42 +354,56 @@ def train(logdir, datadir, clear_old_logs=True):
             network.feed_prev_prob: feed_prev
         }
 
-    with tf.Graph().as_default() as graph:
-        network = Network(Model.small(datadir))
-        train_summaries = tf.summary.merge_all('train')
-        test_summaries = tf.summary.merge_all('test')
+    network = Network(model)
+    train_summaries = tf.summary.merge_all('train')
+    infer_summaries = tf.summary.merge_all('test')
 
-    sv = tf.train.Supervisor(logdir=logdir, summary_op=None, graph=graph)
-    writer = tf.summary.FileWriter(logdir + 'test/')
+    sess = tf.InteractiveSession()
+    saver = tf.train.Saver()
+    train_writer = tf.summary.FileWriter(logdir + 'train/', sess.graph)
+    infer_writer = tf.summary.FileWriter(logdir + 'infer/')
+    tf.global_variables_initializer().run()
 
-    with sv.managed_session() as sess:
+    for n in range(network.model.max_steps):
+        if n % 10 == 0:
+            loss, acc, s, step = sess.run(
+                [network.loss, network.accuracy, infer_summaries,
+                 network.global_step],
+                feed_dict=feed_dict(train=False))
+            print(
+                'Round {} Loss: {} Inference accuracy: {}'
+                .format(n, loss, acc))
+            infer_writer.add_summary(s, global_step=step)
+        elif n % 100 == 99:  # Save model and record execution stats
+            saver.save(sess, logdir + 'checkpoint-',
+                       global_step=step)
+            run_options = tf.RunOptions(
+                trace_level=tf.RunOptions.FULL_TRACE)
+            run_metadata = tf.RunMetadata()
+            loss, acc, s,  step, _ = sess.run(
+                [network.loss, network.accuracy, train_summaries,
+                    network.global_step, network.optimize],
+                feed_dict=feed_dict(train=True),
+                options=run_options,
+                run_metadata=run_metadata)
+            print('Adding run metadata for', n)
+            train_writer.add_run_metadata(run_metadata, 'step%03d' % n)
+            train_writer.add_summary(s, global_step=step)
+        else:
+            loss, acc, s,  step, _ = sess.run(
+                [network.loss, network.accuracy, train_summaries,
+                    network.global_step, network.optimize],
+                feed_dict=feed_dict(train=True))
+            train_writer.add_summary(s, global_step=step)
 
-        # run until training should stop
-        rounds = 0
-        while not sv.should_stop():
-            if rounds % 10 == 0:
-                loss, acc, s = sess.run(
-                    [network.loss, network.accuracy, test_summaries],
-                    feed_dict=feed_dict(train=False))
-                print(
-                    'Round {} Loss: {} Accuracy: {}'.format(rounds, loss, acc))
-                writer.add_summary(s)
-            else:
-                loss, acc, s,  _ = sess.run(
-                    [network.loss, network.accuracy, train_summaries,
-                     network.optimize],
-                    feed_dict=feed_dict(train=True))
-                sv.summary_computed(sess, s)
-
-            if rounds > network.model.max_steps:
-                sv.request_stop()
-            rounds += 1
-        writer.close()
+    train_writer.close()
+    infer_writer.close()
 
 if __name__ == '__main__':
-    # BASE = '/data/safnu1b/latex/'
-    BASE = '/Users/safnu1b/Documents/latex/'
+    BASE = '/data/safnu1b/latex/'
+    # BASE = '/Users/safnu1b/Documents/latex/'
     BASE1 = ''
-    datadir = BASE1 + 'data/'
+    datadir = BASE + 'data/'
     logdir = BASE + 'log/'
-    train(logdir, datadir)
+    model = Model.medium(datadir)
+    train(model, logdir, False)
