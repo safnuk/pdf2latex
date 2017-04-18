@@ -138,7 +138,7 @@ class Network:
                 labels=self.targets, logits=self.logits)
             total_loss = tf.reduce_mean(cross_entropy)
             tf.summary.scalar('cross_entropy', total_loss,
-                              collections=['train'])
+                              collections=['train', 'test'])
             return total_loss
 
     @scope.lazy_load_no_scope
@@ -150,7 +150,7 @@ class Network:
             accuracy = tf.reduce_mean(
                 tf.cast(correct_prediction, tf.float32))
             tf.summary.scalar('accuracy', accuracy,
-                              collections=['train'])
+                              collections=['train', 'test'])
             return accuracy
 
     @scope.lazy_load

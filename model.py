@@ -50,9 +50,9 @@ class Model:
                    100, 1e-3, 1, 2000, 64, 1)
 
     @classmethod
-    def medium(cls, datadir, validation_size=500, test_size=1):
+    def medium(cls, datadir, validation_size=1000, test_size=1):
         return cls('medium', datadir, validation_size, test_size,
-                   100, 0.0001, 1, 2000, 256, 2)
+                   100, 0.0001, 1, 2000, 256, 3)
 
     @classmethod
     def medium_reg(cls, datadir, validation_size=500, test_size=1):
