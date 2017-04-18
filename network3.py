@@ -1,4 +1,5 @@
 import tensorflow as tf
+import tensorflow.contrib.seq2seq as seq2seq
 
 import dataset
 import scope
@@ -52,9 +53,13 @@ class Network:
         # we don't need <GO> token for this network model
         _, targets, lengths = tf.split(
             self.input.token, [1, token_shape[1] - 2, 1], axis=1)
-        # self.sequence_lengths = tf.squeeze(lengths)
-        self.sequence_length = token_shape[1] - 2
+        # subtract 1 from lengths because we chop off <GO> token
+        self.sequence_lengths = tf.squeeze(lengths) - 1
+        self.sequence_lengths.set_shape([self.model.batch_size])
+        # this is the maximal length of each sequence
+        self.sequence_length = tf.reduce_max(self.sequence_lengths)
         time_major = tf.transpose(targets, [1, 0])
+        time_major = tf.slice(time_major, [0, 0], [self.sequence_length, -1])
         return tf.reshape(time_major, [-1], name='flatten')
 
     @scope.lazy_load
@@ -87,37 +92,33 @@ class Network:
             name='flatten')
         inputs_time_major = tf.transpose(rnn_inputs, [1, 0, 2])
         pad_amount = self.sequence_length - tf.shape(inputs_time_major)[0]
-        padded_to_length = tf.pad(inputs_time_major,
-                                  [[0, pad_amount], [0, 0], [0, 0]],
-                                  name='pad')
+        set_to_length = tf.cond(
+            pad_amount > 0,
+            lambda: tf.pad(inputs_time_major,
+                           [[0, pad_amount], [0, 0], [0, 0]], name='pad'),
+            lambda: tf.slice(inputs_time_major, [0, 0, 0],
+                             [self.sequence_length, -1, -1])
+        )
         # doesn't actually reshape, just provides shape info to future steps
-        padded_to_length = tf.reshape(
-            padded_to_length,
+        set_to_length = tf.reshape(
+            set_to_length,
             [-1, self.model.batch_size, self.model.filters.conv3])
-        return padded_to_length
+        return set_to_length
 
     @scope.lazy_load
     def decoder(self):
         cell = self._rnn_cell()
         initial_state = cell.zero_state(self.model.batch_size, dtype=tf.float32)
-        output = tf.scan(
-            lambda a, x: cell(x, a)[1],
-            self.convolution,
-            initializer=initial_state)
-        return output
+        decoder_fn = seq2seq.simple_decoder_fn_train(initial_state)
+        output = seq2seq.dynamic_rnn_decoder(
+            cell, decoder_fn, self.convolution,
+            self.sequence_lengths, time_major=True)
+        return output[0]
 
     @scope.lazy_load
     def logits(self):
-        # reshape/flatten into shape
-        # [sequence_length x batch_size, rnn_cell_size * layers ]
-        if self.model.num_rnn_layers == 1:
-            decoded = (self.decoder)
-        else:
-            decoded = tf.transpose(self.decoder, [1, 2, 0, 3])
-        decoded_dim = self.model.num_rnn_layers * self.model.rnn_cell_size
-        decoded = tf.reshape(
-            decoded,
-            [-1, decoded_dim])
+        decoded_dim = self.model.rnn_cell_size
+        decoded = tf.reshape(self.decoder, [-1, decoded_dim])
         W = tf.get_variable(
             'weight',
             [decoded_dim, self.model.token_vocab_size],
@@ -137,7 +138,7 @@ class Network:
                 labels=self.targets, logits=self.logits)
             total_loss = tf.reduce_mean(cross_entropy)
             tf.summary.scalar('cross_entropy', total_loss,
-                              collections=['train', 'test'])
+                              collections=['train'])
             return total_loss
 
     @scope.lazy_load_no_scope
@@ -149,7 +150,7 @@ class Network:
             accuracy = tf.reduce_mean(
                 tf.cast(correct_prediction, tf.float32))
             tf.summary.scalar('accuracy', accuracy,
-                              collections=['train', 'test'])
+                              collections=['train'])
             return accuracy
 
     @scope.lazy_load

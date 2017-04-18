@@ -2,6 +2,7 @@ import collections
 import json
 import os
 
+import numpy as np
 import xarray as xr
 
 
@@ -39,13 +40,23 @@ class Dataset:
         start = self._index_in_epoch
         if start + batch_size >= self.num_examples:
             self.epochs_completed += 1
+            num_at_tail = self.num_examples - start
+            tail = self.data[dict(example=slice(start, self.num_examples))]
             start = 0
-            self._index_in_epoch = 0
-            # TODO: Include the examples skipped over at the tail end
-        self._index_in_epoch += batch_size
-        end = self._index_in_epoch
-        batch = self.data[dict(example=slice(start, end))]
-        return Batch(batch.features.values, batch.tokens.values)
+            self._index_in_epoch = batch_size - num_at_tail
+            end = self._index_in_epoch
+            head = self.data[dict(example=slice(start, end))]
+            return Batch(
+                np.concatenate((tail.features.values, head.features.values),
+                               axis=0),
+                np.concatenate((tail.tokens.values, head.tokens.values),
+                               axis=0)
+            )
+        else:
+            self._index_in_epoch += batch_size
+            end = self._index_in_epoch
+            batch = self.data[dict(example=slice(start, end))]
+            return Batch(batch.features.values, batch.tokens.values)
 
 
 class Datasets:
