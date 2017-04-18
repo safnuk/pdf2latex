@@ -30,15 +30,13 @@ def train(model, logdir, clear_old_logs=True):
 
     sv = tf.train.Supervisor(logdir=logdir, summary_op=None)
     with sv.managed_session() as sess:
-        train_writer = tf.summary.FileWriter(logdir + 'train/', sess.graph)
         infer_writer = tf.summary.FileWriter(logdir + 'infer/')
-        # tf.global_variables_initializer().run()
 
         step = 0
         while step < network.model.max_steps:
             if sv.should_stop():
                 break
-            if step % 10 == 0:
+            if step % 100 == 0:
                 epoch = network.model.data.validate.epochs_completed
                 runs = 0
                 total_loss = 0
@@ -61,7 +59,7 @@ def train(model, logdir, clear_old_logs=True):
                 infer_writer.add_summary(loss_summary, global_step=step)
                 infer_writer.add_summary(acc_summary, global_step=step)
                 print(
-                    'Round {} Loss: {} Accuracy: {}'
+                    'Round {} Validation loss: {} Accuracy: {}'
                     .format(step, loss, acc))
             if step % 100 == 99:  # Record execution stats
                 run_options = tf.RunOptions(
@@ -74,16 +72,19 @@ def train(model, logdir, clear_old_logs=True):
                     options=run_options,
                     run_metadata=run_metadata)
                 print('Adding run metadata for', step)
-                train_writer.add_run_metadata(run_metadata, 'step%03d' % step)
-                train_writer.add_summary(s, global_step=step)
+                sv.summary_writer.add_run_metadata(
+                    run_metadata, 'step%03d' % step)
+                sv.summary_computed(sess, s)
             else:
                 loss, acc, s, step, _ = sess.run(
                     [network.loss, network.accuracy, train_summaries,
                         network.global_step, network.optimize],
                     feed_dict=feed_dict(train=True))
-                train_writer.add_summary(s, global_step=step)
+                sv.summary_computed(sess, s)
+                if step % 10 == 0:
+                    print("Step {} Train loss: {} Accuracy: {}"
+                          .format(step, loss, acc))
 
-    train_writer.close()
     infer_writer.close()
 
 if __name__ == '__main__':
