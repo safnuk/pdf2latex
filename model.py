@@ -55,6 +55,11 @@ class Model:
                    100, 0.0001, 1, 2000, 256, 3)
 
     @classmethod
+    def large(cls, datadir, validation_size=10000, test_size=1):
+        return cls('large', datadir, validation_size, test_size,
+                   100, 0.0001, 1, 2000, 1024, 3, dropout_keep_prob=0.5)
+
+    @classmethod
     def medium_reg(cls, datadir, validation_size=500, test_size=1):
         return cls('medium-reg', datadir, validation_size, test_size,
                    100, 0.01, 1, 3000, 200, 4,
