@@ -4,7 +4,7 @@ import shutil
 import tensorflow as tf
 
 import model
-import network2 as net
+import network4 as net
 
 
 def train(model, logdir, clear_old_logs=True):
@@ -76,8 +76,8 @@ if __name__ == '__main__':
     # BASE = '/Users/safnu1b/Documents/latex/'
     BASE1 = ''
     BASE = ''
-    datadir = BASE + 'data/'
+    datadir = BASE1 + 'data/'
     logdir = BASE + 'log/'
-    model = model.Model.medium(datadir)
-    logdir = logdir + model.name + '-net2/'
+    model = model.Model.large(datadir)
+    logdir = logdir + model.name + '-net4/'
     train(model, logdir, True)

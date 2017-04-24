@@ -18,6 +18,7 @@ class Model:
         max_steps=1000,
         rnn_cell_size=64,
         num_rnn_layers=1,
+        grad_clip=10,
         conv_filter_sizes=FilterSizes(5, 3, 5),
         embedding_dims=dataset.EmbeddingSize(
             **{'chars': 5, 'fonts': 3, 'fontsizes': 1, 'tokens': 10}),
@@ -30,6 +31,7 @@ class Model:
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.learning_rate_decay_factor = learning_rate_decay_factor
+        self.grad_clip = grad_clip,
         self.max_steps = max_steps
         self.rnn_cell_size = rnn_cell_size
         self.num_rnn_layers = num_rnn_layers
@@ -47,7 +49,7 @@ class Model:
     @classmethod
     def small(cls, datadir, validation_size=500, test_size=1):
         return cls('small', datadir, validation_size, test_size,
-                   100, 1e-3, 1, 2000, 64, 1)
+                   100, 1e-3, 1, 2000, 2, 1)
 
     @classmethod
     def medium(cls, datadir, validation_size=1000, test_size=1):
@@ -55,7 +57,7 @@ class Model:
                    100, 0.0001, 1, 2000, 256, 3)
 
     @classmethod
-    def large(cls, datadir, validation_size=10000, test_size=1):
+    def large(cls, datadir, validation_size=5000, test_size=1):
         return cls('large', datadir, validation_size, test_size,
                    100, 0.0001, 1, 2000, 1024, 3, dropout_keep_prob=0.5)
 

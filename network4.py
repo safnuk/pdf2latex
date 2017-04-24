@@ -52,10 +52,9 @@ class Network:
         # we don't need <GO> token for this network model
         _, targets, lengths = tf.split(
             self.input.token, [1, token_shape[1] - 2, 1], axis=1)
-        # self.sequence_lengths = tf.squeeze(lengths)
+        self.sequence_lengths = tf.squeeze(lengths)
         self.sequence_length = token_shape[1] - 2
-        time_major = tf.transpose(targets, [1, 0])
-        return tf.reshape(time_major, [-1], name='flatten')
+        return tf.reshape(targets, [-1], name='flatten')
 
     @scope.lazy_load
     def convolution(self):
@@ -85,50 +84,38 @@ class Network:
         rnn_inputs = tf.transpose(conv3, [0, 2, 1, 3])
         rnn_inputs = tf.reshape(
             rnn_inputs, [conv_shape[0], -1, self.model.filters.conv3],
-            name='flatten')
-        inputs_time_major = tf.transpose(rnn_inputs, [1, 0, 2])
-        pad_amount = self.sequence_length - tf.shape(inputs_time_major)[0]
-        padded_to_length = tf.pad(inputs_time_major,
-                                  [[0, pad_amount], [0, 0], [0, 0]],
+            name='flatten_to_string')
+        # inputs_time_major = tf.transpose(rnn_inputs, [1, 0, 2])
+        pad_amount = self.sequence_length - tf.shape(rnn_inputs)[1]
+        padded_to_length = tf.pad(rnn_inputs,
+                                  [[0, 0], [0, pad_amount], [0, 0]],
                                   name='pad')
         # doesn't actually reshape, just provides shape info to future steps
         padded_to_length = tf.reshape(
             padded_to_length,
-            [-1, self.model.batch_size, self.model.filters.conv3])
+            [self.model.batch_size, self.sequence_length, self.model.filters.conv3])
         return padded_to_length
 
     @scope.lazy_load
     def decoder(self):
         cell = self._rnn_cell()
+        cell = tf.contrib.rnn.OutputProjectionWrapper(
+            cell, self.model.token_vocab_size )
         initial_state = cell.zero_state(self.model.batch_size, dtype=tf.float32)
-        output = tf.scan(
-            lambda a, x: cell(x, a)[1],
-            self.convolution,
-            initializer=initial_state)
+        output, state = tf.nn.dynamic_rnn(
+            cell, self.convolution, sequence_length=self.sequence_lengths,
+            time_major=False, initial_state=initial_state
+        )
         return output
 
     @scope.lazy_load
     def logits(self):
-        # reshape/flatten into shape
-        # [sequence_length x batch_size, rnn_cell_size * layers ]
-        if self.model.num_rnn_layers == 1:
-            decoded = (self.decoder)
-        else:
-            decoded = tf.transpose(self.decoder, [1, 2, 0, 3])
-        decoded_dim = self.model.num_rnn_layers * self.model.rnn_cell_size
-        decoded = tf.reshape(
-            decoded,
+        decoded_dim = self.model.token_vocab_size
+        decoded_flat = tf.reshape(
+            self.decoder,
             [-1, decoded_dim])
-        W = tf.get_variable(
-            'weight',
-            [decoded_dim, self.model.token_vocab_size],
-            initializer=tf.truncated_normal_initializer()
-        )
-        self._activation_summary(W)
-        b = tf.get_variable('bias', [self.model.token_vocab_size],
-                            initializer=tf.constant_initializer(0.0))
-        self._activation_summary(b)
-        return tf.matmul(decoded, W) + b
+        return decoded_flat
+
 
     @scope.lazy_load_no_scope
     def loss(self):
@@ -136,31 +123,38 @@ class Network:
             self.loss_scope = scope
             cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
                 labels=self.targets, logits=self.logits)
-            total_loss = tf.reduce_mean(cross_entropy)
-            tf.summary.scalar('cross_entropy', total_loss,
+            mask = tf.cast(tf.sign(self.targets), dtype=tf.float32)
+            cross_entropy = cross_entropy * mask
+
+            cross_entropy = tf.reduce_sum(cross_entropy, reduction_indices=0)
+            cross_entropy /= tf.cast(tf.reduce_sum(self.sequence_lengths), tf.float32)
+            tf.summary.scalar('cross_entropy', cross_entropy,
                               collections=['train', 'test'])
-            return total_loss
+            return cross_entropy
 
     @scope.lazy_load_no_scope
     def accuracy(self):
         with tf.variable_scope(self.loss_scope.original_name_scope):
-            correct_prediction = tf.equal(
+            correct_prediction = tf.cast(tf.equal(
                 tf.cast(tf.argmax(self.logits, 1), tf.int32),
-                self.targets, name='correct')
-            accuracy = tf.reduce_mean(
-                tf.cast(correct_prediction, tf.float32))
+                self.targets, name='correct'), tf.float32)
+            correct_prediction = correct_prediction * tf.cast(
+                tf.sign(self.targets), tf.float32)
+            accuracy = tf.reduce_sum(correct_prediction)
+            accuracy /= tf.cast(tf.reduce_sum(self.sequence_lengths), tf.float32)
             tf.summary.scalar('accuracy', accuracy,
                               collections=['train', 'test'])
             return accuracy
 
     @scope.lazy_load
     def optimize(self):
-        tvars = tf.trainable_variables()
-        grads, _ = tf.clip_by_global_norm(tf.gradients(self.loss, tvars),
-                                          self.model.grad_clip)
+        # tvars = tf.trainable_variables()
+        # grads, _ = tf.clip_by_global_norm(tf.gradients(self.loss, tvars),
+        #                                   self.model.grad_clip)
         optimizer = tf.train.AdamOptimizer(self.model.learning_rate)
-        return optimizer.apply_gradients(
-            zip(grads, tvars), global_step=self.global_step)
+        return optimizer.minimize(self.loss, global_step=self.global_step)
+        # return optimizer.apply_gradients(
+        #     zip(grads, tvars), global_step=self.global_step)
 
     def _activation_summary(self, x):
         """Helper to create summaries for activations.
