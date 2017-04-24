@@ -16,12 +16,15 @@ def train(model, logdir, clear_old_logs=True):
         if train:
             batch = network.model.data.train.next_batch(
                 network.model.batch_size)
+            dropout = network.model.dropout_keep_prob
         else:
             batch = network.model.data.validate.next_batch(
                 network.model.batch_size)
+            dropout = 1.0
         return {
             network.input.pdf: batch.pdf,
             network.input.token: batch.token,
+            network.dropout: dropout,
         }
 
     network = net.Network(model)
@@ -72,7 +75,7 @@ def train(model, logdir, clear_old_logs=True):
     infer_writer.close()
 
 if __name__ == '__main__':
-    # BASE = '/data/safnu1b/latex/'
+    BASE = '/data/safnu1b/latex/'
     # BASE = '/Users/safnu1b/Documents/latex/'
     BASE1 = ''
     BASE = ''

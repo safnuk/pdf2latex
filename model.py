@@ -19,9 +19,9 @@ class Model:
         rnn_cell_size=64,
         num_rnn_layers=1,
         grad_clip=10,
-        conv_filter_sizes=FilterSizes(5, 3, 5),
+        conv_filter_sizes=FilterSizes(16, 16, 16),
         embedding_dims=dataset.EmbeddingSize(
-            **{'chars': 5, 'fonts': 3, 'fontsizes': 1, 'tokens': 10}),
+            **{'chars': 8, 'fonts': 3, 'fontsizes': 2, 'tokens': 10}),
         use_lstm=False,
         use_rnn_layer_norm=False,
         dropout_keep_prob=1.0
@@ -59,7 +59,7 @@ class Model:
     @classmethod
     def large(cls, datadir, validation_size=5000, test_size=1):
         return cls('large', datadir, validation_size, test_size,
-                   100, 0.0001, 1, 2000, 1024, 3, dropout_keep_prob=0.5)
+                   100, 0.00005, 1, 2000, 1536, 3, dropout_keep_prob=0.5)
 
     @classmethod
     def medium_reg(cls, datadir, validation_size=500, test_size=1):

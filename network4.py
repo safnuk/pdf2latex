@@ -7,7 +7,7 @@ import scope
 class Network:
     def __init__(self, model):
         self.model = model
-        self.dropout = 1.0
+        self.dropout = tf.placeholder(tf.float32, shape=[])
         self.global_step = tf.Variable(0, name='global_step', trainable=False)
         self.input = dataset.Batch(
             tf.placeholder(tf.int32, shape=[None, 366, 100, 3]),
@@ -64,10 +64,16 @@ class Network:
             Application of three convolution layers to
             the feature_embedding layer.
         """
+        with tf.variable_scope('filter0'):
+            conv0 = self._conv_relu(
+                self.feature_embedding,
+                [3, 3, self.model.feature_dim, 16],
+                [1, 1, 1, 1], 'SAME'
+            )
         with tf.variable_scope('filter1'):
             conv1 = self._conv_relu(
-                self.feature_embedding,
-                [4, 6, self.model.feature_dim, self.model.filters.conv1],
+                conv0,
+                [4, 6, 16, self.model.filters.conv1],
                 [1, 2, 2, 1], 'VALID')
         with tf.variable_scope('filter2'):
             conv2 = self._conv_relu(
