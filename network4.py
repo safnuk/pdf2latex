@@ -87,9 +87,10 @@ class Network:
                 [1, 1, 2, 1], 'SAME')
         conv_shape = tf.shape(conv3)
         # flatten to a sequence of vectors to feed to the encoder
-        rnn_inputs = tf.transpose(conv3, [0, 2, 1, 3])
+        # rnn_inputs = tf.transpose(conv3, [0, 2, 1, 3])
         rnn_inputs = tf.reshape(
-            rnn_inputs, [conv_shape[0], -1, self.model.filters.conv3],
+            conv3, [conv_shape[0], -1, self.model.filters.conv3],
+            # rnn_inputs, [conv_shape[0], -1, self.model.filters.conv3],
             name='flatten_to_string')
         # inputs_time_major = tf.transpose(rnn_inputs, [1, 0, 2])
         pad_amount = self.sequence_length - tf.shape(rnn_inputs)[1]
@@ -99,14 +100,15 @@ class Network:
         # doesn't actually reshape, just provides shape info to future steps
         padded_to_length = tf.reshape(
             padded_to_length,
-            [self.model.batch_size, self.sequence_length, self.model.filters.conv3])
+            [self.model.batch_size, self.sequence_length,
+             self.model.filters.conv3])
         return padded_to_length
 
     @scope.lazy_load
     def decoder(self):
         cell = self._rnn_cell()
         cell = tf.contrib.rnn.OutputProjectionWrapper(
-            cell, self.model.token_vocab_size )
+            cell, self.model.token_vocab_size)
         initial_state = cell.zero_state(self.model.batch_size, dtype=tf.float32)
         output, state = tf.nn.dynamic_rnn(
             cell, self.convolution, sequence_length=self.sequence_lengths,
@@ -122,7 +124,6 @@ class Network:
             [-1, decoded_dim])
         return decoded_flat
 
-
     @scope.lazy_load_no_scope
     def loss(self):
         with tf.variable_scope('loss') as scope:
@@ -133,7 +134,8 @@ class Network:
             cross_entropy = cross_entropy * mask
 
             cross_entropy = tf.reduce_sum(cross_entropy, reduction_indices=0)
-            cross_entropy /= tf.cast(tf.reduce_sum(self.sequence_lengths), tf.float32)
+            cross_entropy /= tf.cast(
+                tf.reduce_sum(self.sequence_lengths), tf.float32)
             tf.summary.scalar('cross_entropy', cross_entropy,
                               collections=['train', 'test'])
             return cross_entropy
@@ -141,13 +143,16 @@ class Network:
     @scope.lazy_load_no_scope
     def accuracy(self):
         with tf.variable_scope(self.loss_scope.original_name_scope):
+            target_signs = tf.sign(self.targets)
+            self.inference = tf.cast(tf.argmax(self.logits, 1), tf.int32)
             correct_prediction = tf.cast(tf.equal(
-                tf.cast(tf.argmax(self.logits, 1), tf.int32),
-                self.targets, name='correct'), tf.float32)
+                self.inference, self.targets, name='correct'), tf.float32)
+            self.inference = self.inference * target_signs
             correct_prediction = correct_prediction * tf.cast(
-                tf.sign(self.targets), tf.float32)
+                target_signs, tf.float32)
             accuracy = tf.reduce_sum(correct_prediction)
-            accuracy /= tf.cast(tf.reduce_sum(self.sequence_lengths), tf.float32)
+            accuracy /= tf.cast(
+                tf.reduce_sum(self.sequence_lengths), tf.float32)
             tf.summary.scalar('accuracy', accuracy,
                               collections=['train', 'test'])
             return accuracy

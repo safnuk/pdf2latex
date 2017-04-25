@@ -40,14 +40,21 @@ def train(model, logdir, clear_old_logs=True):
             if sv.should_stop():
                 break
             if step % 10 == 0:
-                loss, acc, summary, step = sess.run(
-                    [network.loss, network.accuracy, test_summaries,
-                        network.global_step],
+                loss, acc, infer, targets, lengths, summary, step = sess.run(
+                    [network.loss, network.accuracy,
+                     network.inference, network.targets,
+                     network.sequence_lengths,
+                     test_summaries, network.global_step],
                     feed_dict=feed_dict(train=False))
                 infer_writer.add_summary(summary, global_step=step)
                 print(
                     'Round {} Validation loss: {} Accuracy: {}'
                     .format(step, loss, acc))
+                length = lengths[0]
+                print("Inference:")
+                print(network.model.data.infer(infer[:length+1]))
+                print("--------------\nActual:")
+                print(network.model.data.infer(targets[:length+1]))
             if step % 100 == 99:  # Record execution stats
                 run_options = tf.RunOptions(
                     trace_level=tf.RunOptions.FULL_TRACE)
@@ -76,7 +83,7 @@ def train(model, logdir, clear_old_logs=True):
 
 if __name__ == '__main__':
     BASE = '/data/safnu1b/latex/'
-    # BASE = '/Users/safnu1b/Documents/latex/'
+    BASE = '/Users/safnu1b/Documents/latex/'
     BASE1 = ''
     BASE = ''
     datadir = BASE1 + 'data/'

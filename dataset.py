@@ -75,6 +75,14 @@ class Datasets:
         # the last entry of each token sequence is the length of the
         # sequence (remaining entries are padded with 'null' code = 0)
         self.token_sequence_length = train.tokens.shape[1]
+        self._calc_decodings()
+
+    def _calc_decodings(self):
+        self.decodings = {v: k for k, v in self.encodings['tokens'].items()}
+
+    def infer(self, codes):
+        tokens = [self.decodings[code] for code in codes]
+        return ''.join(tokens)
 
 
 def read_datasets(data_dir, validation_size=10000, test_size=10000):
