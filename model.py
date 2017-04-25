@@ -59,7 +59,7 @@ class Model:
     @classmethod
     def large(cls, datadir, validation_size=5000, test_size=1):
         return cls('large', datadir, validation_size, test_size,
-                   100, 0.00005, 1, 2000, 1536, 3, dropout_keep_prob=0.5)
+                   100, 0.00005, 1, 6000, 1536, 3, dropout_keep_prob=0.5)
 
     @classmethod
     def medium_reg(cls, datadir, validation_size=500, test_size=1):
