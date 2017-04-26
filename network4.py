@@ -8,6 +8,8 @@ class Network:
     def __init__(self, model):
         self.model = model
         self.dropout = tf.placeholder(tf.float32, shape=[])
+        self.sparsity_adjustment = .99
+        self.total_loss_ratio = 0.5  # portion of loss coming from autoencoder
         self.global_step = tf.Variable(0, name='global_step', trainable=False)
         self.input = dataset.Batch(
             tf.placeholder(tf.int32, shape=[None, 366, 100, 3]),
@@ -17,9 +19,13 @@ class Network:
         self.feature_embedding
         self.targets
         self.convolution
+        self.autoencoder
+        self.autoencoder_loss
+        self.encoded
         self.decoder
         self.logits
         self.loss
+        self.total_loss
         self.accuracy
         self.optimize
 
@@ -65,15 +71,19 @@ class Network:
             the feature_embedding layer.
         """
         with tf.variable_scope('filter0'):
-            conv0 = self._conv_relu(
-                self.feature_embedding,
-                [3, 3, self.model.feature_dim, 16],
-                [1, 1, 1, 1], 'SAME'
-            )
+            if self.model.filters.conv0 > 0:
+                conv0_dim = self.model.filters.conv0
+                conv0 = self._conv_relu(
+                    self.feature_embedding,
+                    [3, 3, self.model.feature_dim, self.model.filters.conv0],
+                    [1, 1, 1, 1], 'SAME')
+            else:
+                conv0 = self.feature_embedding
+                conv0_dim = self.model.feature_dim
         with tf.variable_scope('filter1'):
             conv1 = self._conv_relu(
                 conv0,
-                [4, 6, 16, self.model.filters.conv1],
+                [4, 6, conv0_dim, self.model.filters.conv1],
                 [1, 2, 2, 1], 'VALID')
         with tf.variable_scope('filter2'):
             conv2 = self._conv_relu(
@@ -85,11 +95,65 @@ class Network:
                 conv2,
                 [3, 3, self.model.filters.conv2, self.model.filters.conv3],
                 [1, 1, 2, 1], 'SAME')
-        conv_shape = tf.shape(conv3)
+        return conv3
+
+    @scope.lazy_load
+    def autoencoder(self):
+        vocab_sizes = self.model.feature_vocab_size
+        out_dim = vocab_sizes.chars + vocab_sizes.fonts + vocab_sizes.fontsizes
+        hidden_dim = 10
+        conv_flat = tf.reshape(
+            self.convolution,
+            [self.model.batch_size, -1])
+        with tf.variable_scope('projection'):
+            projection = tf.nn.relu(self._linear_layer(
+                conv_flat,
+                [60*8*self.model.filters.conv3, 366*100*hidden_dim]))
+            projection = tf.reshape(
+                projection, [self.model.batch_size, -1, hidden_dim])
+        with tf.variable_scope('feature_logits'):
+            feature_logits = tf.reshape(self._linear_layer(
+                tf.reshape(projection, [-1, hidden_dim]),
+                [hidden_dim, out_dim]), [self.model.batch_size, -1, out_dim])
+            feature_splits = tf.split(
+                feature_logits,
+                [vocab_sizes.chars, vocab_sizes.fonts, vocab_sizes.fontsizes],
+                axis=2
+            )
+        return feature_splits
+
+    @scope.lazy_load
+    def autoencoder_loss(self):
+        feature_targets = tf.unstack(tf.reshape(
+            self.input.pdf,
+            [self.model.batch_size, -1, 3]), axis=2, name='feature_targets')
+        cross_entropies = [
+            tf.nn.sparse_softmax_cross_entropy_with_logits(
+                labels=target, logits=logits)
+            for target, logits in zip(feature_targets, self.autoencoder)
+        ]
+        cross_entropy = tf.add_n(cross_entropies, name='cross_entropy')
+        mask = tf.cast(
+            tf.sign(feature_targets[0]), dtype=tf.float32, name='mask')
+
+        sparsity = tf.reduce_sum(mask) / tf.cast(tf.size(mask), tf.float32)
+        sparsity = (sparsity * self.sparsity_adjustment +
+                    (1-self.sparsity_adjustment))
+        mask = (1 - sparsity) * mask + sparsity
+        cross_entropy = mask * cross_entropy
+        cross_entropy = tf.reduce_sum(cross_entropy, axis=0)
+        cross_entropy /= tf.reduce_sum(mask)
+        tf.summary.scalar('autoencoder_cross_entropy', cross_entropy,
+                          collections=['train', 'test'])
+        return cross_entropy
+
+    @scope.lazy_load
+    def encoded(self):
+        conv_shape = tf.shape(self.convolution)
         # flatten to a sequence of vectors to feed to the encoder
-        # rnn_inputs = tf.transpose(conv3, [0, 2, 1, 3])
+        rnn_inputs = tf.transpose(self.convolution, [0, 2, 1, 3])
         rnn_inputs = tf.reshape(
-            conv3, [conv_shape[0], -1, self.model.filters.conv3],
+            self.convolution, [conv_shape[0], -1, self.model.filters.conv3],
             # rnn_inputs, [conv_shape[0], -1, self.model.filters.conv3],
             name='flatten_to_string')
         # inputs_time_major = tf.transpose(rnn_inputs, [1, 0, 2])
@@ -111,7 +175,7 @@ class Network:
             cell, self.model.token_vocab_size)
         initial_state = cell.zero_state(self.model.batch_size, dtype=tf.float32)
         output, state = tf.nn.dynamic_rnn(
-            cell, self.convolution, sequence_length=self.sequence_lengths,
+            cell, self.encoded, sequence_length=self.sequence_lengths,
             time_major=False, initial_state=initial_state
         )
         return output
@@ -141,6 +205,11 @@ class Network:
             return cross_entropy
 
     @scope.lazy_load_no_scope
+    def total_loss(self):
+        return (self.total_loss_ratio * self.autoencoder_loss +
+                (1 - self.total_loss_ratio) * self.loss)
+
+    @scope.lazy_load_no_scope
     def accuracy(self):
         with tf.variable_scope(self.loss_scope.original_name_scope):
             target_signs = tf.sign(self.targets)
@@ -163,7 +232,7 @@ class Network:
         # grads, _ = tf.clip_by_global_norm(tf.gradients(self.loss, tvars),
         #                                   self.model.grad_clip)
         optimizer = tf.train.AdamOptimizer(self.model.learning_rate)
-        return optimizer.minimize(self.loss, global_step=self.global_step)
+        return optimizer.minimize(self.total_loss, global_step=self.global_step)
         # return optimizer.apply_gradients(
         #     zip(grads, tvars), global_step=self.global_step)
 
@@ -214,6 +283,20 @@ class Network:
                 initializer=tf.random_uniform_initializer(-1.0, 1.0))
             self._activation_summary(matrix)
             return tf.nn.embedding_lookup(matrix, input, name='project')
+
+    def _linear_layer(self, input, shape):
+        """
+        Constructs tensors W, b and transforms input -> input * W + b
+        """
+        weights = tf.get_variable(
+            'weights', shape, tf.float32,
+            initializer=tf.random_normal_initializer()
+        )
+        self._activation_summary(weights)
+        biases = tf.get_variable(
+            "biases", shape[1], initializer=tf.constant_initializer(0.0))
+        self._activation_summary(biases)
+        return tf.matmul(input, weights) + biases
 
     def _rnn_cell(self):
         if self.model.num_rnn_layers > 1:

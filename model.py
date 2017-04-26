@@ -2,7 +2,8 @@ import collections
 
 import dataset
 
-FilterSizes = collections.namedtuple('FilterSizes', ['conv1', 'conv2', 'conv3'])
+FilterSizes = collections.namedtuple(
+    'FilterSizes', ['conv0', 'conv1', 'conv2', 'conv3'])
 
 
 class Model:
@@ -19,9 +20,9 @@ class Model:
         rnn_cell_size=64,
         num_rnn_layers=1,
         grad_clip=10,
-        conv_filter_sizes=FilterSizes(16, 16, 16),
+        conv_filter_sizes=FilterSizes(0, 6, 6, 6),
         embedding_dims=dataset.EmbeddingSize(
-            **{'chars': 8, 'fonts': 3, 'fontsizes': 2, 'tokens': 10}),
+            **{'chars': 5, 'fonts': 3, 'fontsizes': 2, 'tokens': 10}),
         use_lstm=False,
         use_rnn_layer_norm=False,
         dropout_keep_prob=1.0
@@ -59,7 +60,9 @@ class Model:
     @classmethod
     def large(cls, datadir, validation_size=5000, test_size=1):
         return cls('large', datadir, validation_size, test_size,
-                   100, 0.00005, 1, 6000, 1536, 3, dropout_keep_prob=0.5)
+                   50, 0.0001, 1, 6000, 1536, 3,
+                   conv_filter_sizes=FilterSizes(10, 10, 10, 10),
+                   dropout_keep_prob=0.5)
 
     @classmethod
     def medium_reg(cls, datadir, validation_size=500, test_size=1):
