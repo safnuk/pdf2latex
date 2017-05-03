@@ -32,9 +32,8 @@ class Network:
     @scope.lazy_load
     def trim(self):
         shape = tf.shape(self.input.pdf)
-        trimmed = tf.slice(self.input.pdf,
-                [0, 0, 0, 0],
-                [-1, shape[1]-6, shape[2]-4, -1])
+        trimmed = tf.slice(
+            self.input.pdf, [0, 0, 0, 0], [-1, shape[1]-6, shape[2]-4, -1])
         trimmed.set_shape([self.model.batch_size, 360, 96, 3])
         return trimmed
 
@@ -93,18 +92,24 @@ class Network:
             conv1 = self._conv_relu(
                 conv0,
                 [5, 5, conv0_dim, self.model.filters.conv1],
-                [1, 2, 2, 1], 'SAME')
+                [1, 1, 1, 1], 'SAME')
+            pool1 = tf.nn.max_pool(conv1, ksize=[1, 2, 2, 1],
+                                   strides=[1, 2, 2, 1], padding='SAME')
         with tf.variable_scope('filter2'):
             conv2 = self._conv_relu(
-                conv1,
+                pool1,
                 [5, 5, self.model.filters.conv1, self.model.filters.conv2],
-                [1, 3, 3, 1], 'SAME')
+                [1, 1, 1, 1], 'SAME')
+            pool2 = tf.nn.max_pool(conv2, ksize=[1, 3, 3, 1],
+                                   strides=[1, 3, 3, 1], padding='SAME')
         with tf.variable_scope('filter3'):
             conv3 = self._conv_relu(
-                conv2,
+                pool2,
                 [5, 5, self.model.filters.conv2, self.model.filters.conv3],
                 [1, 1, 2, 1], 'SAME')
-        return conv3
+            pool3 = tf.nn.max_pool(conv3, ksize=[1, 1, 2, 1],
+                                   strides=[1, 1, 2, 1], padding='SAME')
+        return pool3
 
     @scope.lazy_load
     def autoencoder(self):
@@ -120,7 +125,8 @@ class Network:
             decode1 = tf.reshape(
                     decode1, [-1, 60, 8, 3, 4, 3])
             unstacked = tf.unstack(decode1, axis=3)
-            unstacked = [tf.reshape(t, [-1, 60, 32, hidden1]) for t in unstacked]
+            unstacked = [tf.reshape(t, [-1, 60, 32, hidden1])
+                         for t in unstacked]
             decode1 = tf.concat(unstacked, axis=2)
             decode1 = tf.reshape(decode1, [-1, 180, 32, hidden1])
         with tf.variable_scope('conv_decode2'):
@@ -130,7 +136,8 @@ class Network:
                     [1, 1, 1, 1], 'SAME')
             decode2 = tf.reshape(decode2, [-1, 180, 32, 2, 3, hidden2])
             unstacked = tf.unstack(decode2, axis=3)
-            unstacked = [tf.reshape(t, [-1, 180, 96, hidden2]) for t in unstacked]
+            unstacked = [tf.reshape(t, [-1, 180, 96, hidden2])
+                         for t in unstacked]
             decode2 = tf.concat(unstacked, axis=2)
             decode2 = tf.reshape(decode2, [-1, 360, 96, hidden2])
         with tf.variable_scope('feature_logits'):

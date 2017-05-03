@@ -20,7 +20,7 @@ class Model:
         rnn_cell_size=64,
         num_rnn_layers=1,
         grad_clip=10,
-        conv_filter_sizes=FilterSizes(0, 6, 6, 6),
+        conv_filter_sizes=FilterSizes(16, 16, 16, 16),
         embedding_dims=dataset.EmbeddingSize(
             **{'chars': 5, 'fonts': 3, 'fontsizes': 2, 'tokens': 10}),
         use_lstm=False,
@@ -50,7 +50,7 @@ class Model:
     @classmethod
     def small(cls, datadir, validation_size=500, test_size=1):
         return cls('small', datadir, validation_size, test_size,
-                   100, 1e-3, 1, 2000, 2, 1)
+                   20, 1e-4, 1, 6000, 64, 1)
 
     @classmethod
     def medium(cls, datadir, validation_size=1000, test_size=1):

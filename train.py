@@ -88,6 +88,6 @@ if __name__ == '__main__':
     BASE = ''
     datadir = BASE1 + 'data/'
     logdir = BASE + 'log/'
-    model = model.Model.large(datadir)
-    logdir = logdir + model.name + '-net4/'
-    train(model, logdir, True)
+    model = model.Model.small(datadir)
+    logdir = logdir + model.name + '-net6/'
+    train(model, logdir, False)
